@@ -1,0 +1,356 @@
+---
+title: NestJS
+description: Integrate SignaKit feature flags into a NestJS application — injectable module, service wrapper, guard pattern, and controller usage with the @signakit/flags-node SDK.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# NestJS
+
+**SDK:** `@signakit/flags-node`
+**NestJS version:** 10+
+
+The recommended pattern for NestJS is a `SignakitModule` that creates the SDK singleton once on application startup, a `SignakitService` that wraps the client for injection, and a reusable `FlagGuard` for route-level feature gating. All flag evaluation stays server-side.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```npm
+npm install @signakit/flags-node
+```
+
+Add your SDK key to your environment:
+
+```bash title=".env"
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create the SignakitModule
+
+Create a dedicated module that initializes the SDK client once using `useFactory`. The factory awaits `onReady()` so the client is fully loaded before any service can inject it.
+
+```ts title="signakit/signakit.module.ts"
+import { Module } from '@nestjs/common'
+import { SignakitService } from './signakit.service'
+import { createInstance } from '@signakit/flags-node'
+
+export const SIGNAKIT_CLIENT = 'SIGNAKIT_CLIENT'
+
+@Module({
+  providers: [
+    {
+      provide: SIGNAKIT_CLIENT,
+      useFactory: async () => {
+        const client = createInstance({
+          sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+        })
+        const { success, reason } = await client.onReady()
+        if (!success) {
+          console.warn('SignaKit failed to load config:', reason)
+        }
+        return client
+      },
+    },
+    SignakitService,
+  ],
+  exports: [SignakitService],
+})
+export class SignakitModule {}
+```
+
+<Callout type="info">
+`useFactory` with an async factory integrates naturally with NestJS's dependency injection lifecycle. The module waits for the factory to resolve before the application finishes bootstrapping, so `onReady()` completes before any request is handled.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Create the SignakitService
+
+The service wraps the injected client and exposes the methods the rest of your application needs.
+
+```ts title="signakit/signakit.service.ts"
+import { Injectable, Inject } from '@nestjs/common'
+import type { SignaKitClient, SignaKitDecision } from '@signakit/flags-node'
+import { SIGNAKIT_CLIENT } from './signakit.module'
+
+@Injectable()
+export class SignakitService {
+  constructor(
+    @Inject(SIGNAKIT_CLIENT) private readonly client: SignaKitClient,
+  ) {}
+
+  decide(userId: string, flagKey: string, attributes?: Record<string, string | number | boolean>): SignaKitDecision | null {
+    const userCtx = this.client.createUserContext(userId, attributes)
+    return userCtx.decide(flagKey)
+  }
+
+  async trackEvent(
+    userId: string,
+    eventName: string,
+    properties?: Record<string, string | number | boolean>,
+  ): Promise<void> {
+    const userCtx = this.client.createUserContext(userId, properties)
+    await userCtx.trackEvent(eventName)
+  }
+
+  createUserContext(userId: string, attributes?: Record<string, string | number | boolean>) {
+    return this.client.createUserContext(userId, attributes)
+  }
+}
+```
+
+</Step>
+
+<Step>
+
+### Register SignakitModule in your AppModule
+
+Import `SignakitModule` in `AppModule` so it is available across your application.
+
+```ts title="app.module.ts"
+import { Module } from '@nestjs/common'
+import { SignakitModule } from './signakit/signakit.module'
+
+@Module({
+  imports: [SignakitModule],
+})
+export class AppModule {}
+```
+
+Any feature module that needs flag evaluation should also import `SignakitModule`, or add it to a shared module that is globally available.
+
+</Step>
+
+</Steps>
+
+---
+
+## Injecting SignakitService into a controller
+
+With `SignakitModule` imported, inject `SignakitService` into any controller via constructor injection. Extract the user ID from the request — from a cookie, a JWT claim, or your auth session.
+
+```ts title="checkout/checkout.controller.ts"
+import { Controller, Get, Req } from '@nestjs/common'
+import { Request } from 'express'
+import { SignakitService } from '../signakit/signakit.service'
+
+@Controller('checkout')
+export class CheckoutController {
+  constructor(private readonly signakit: SignakitService) {}
+
+  @Get()
+  getCheckout(@Req() request: Request) {
+    const userId = request.cookies['visitor_id'] ?? 'anonymous'
+
+    const decision = this.signakit.decide(userId, 'checkout-redesign', {
+      plan: request.user?.plan ?? 'free',
+    })
+
+    return {
+      variant: decision?.variationKey ?? 'control',
+      showNewCheckout: decision?.enabled ?? false,
+    }
+  }
+}
+```
+
+---
+
+## Guard pattern
+
+A `FlagGuard` lets you gate an entire route behind a feature flag declaratively with `@UseGuards`. Create it as a factory function that accepts the flag key so the guard is reusable across routes.
+
+```ts title="guards/flag.guard.ts"
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+  mixin,
+  Type,
+} from '@nestjs/common'
+import { SignakitService } from '../signakit/signakit.service'
+
+export function FlagGuard(flagKey: string): Type<CanActivate> {
+  @Injectable()
+  class MixinFlagGuard implements CanActivate {
+    constructor(private readonly signakit: SignakitService) {}
+
+    canActivate(context: ExecutionContext): boolean {
+      const request = context.switchToHttp().getRequest()
+      const userId = request.cookies?.['visitor_id'] ?? 'anonymous'
+
+      const decision = this.signakit.decide(userId, flagKey)
+
+      if (!decision?.enabled) {
+        throw new ForbiddenException(`Feature '${flagKey}' is not enabled for this user.`)
+      }
+
+      return true
+    }
+  }
+
+  return mixin(MixinFlagGuard)
+}
+```
+
+Apply the guard to a controller or individual route handler:
+
+```ts title="beta/beta.controller.ts"
+import { Controller, Get, UseGuards } from '@nestjs/common'
+import { FlagGuard } from '../guards/flag.guard'
+
+@Controller('beta')
+export class BetaController {
+
+  @Get('dashboard')
+  @UseGuards(FlagGuard('beta-dashboard'))
+  getBetaDashboard() {
+    return { message: 'Welcome to the beta dashboard.' }
+  }
+
+  @Get('analytics')
+  @UseGuards(FlagGuard('beta-analytics'))
+  getBetaAnalytics() {
+    return { message: 'Beta analytics are enabled for you.' }
+  }
+}
+```
+
+<Callout type="info">
+The `mixin()` helper from `@nestjs/common` is required to make the guard work correctly with NestJS's DI container when using the factory pattern. Without it, the injected `SignakitService` dependency will not resolve.
+</Callout>
+
+---
+
+## Tracking conversion events
+
+Track goal events from a service or controller after the user completes an action.
+
+```ts title="checkout/checkout.service.ts"
+import { Injectable } from '@nestjs/common'
+import { SignakitService } from '../signakit/signakit.service'
+
+@Injectable()
+export class CheckoutService {
+  constructor(private readonly signakit: SignakitService) {}
+
+  async completePurchase(userId: string, amount: number): Promise<void> {
+    // ... your purchase logic
+
+    await this.signakit.trackEvent(userId, 'purchase_completed', {
+      value: amount,
+    })
+  }
+}
+```
+
+---
+
+## Using attributes for targeting
+
+Pass user attributes when creating the context to match against audience rules configured in the dashboard. Attributes are evaluated locally — no additional network call.
+
+```ts title="users/users.controller.ts"
+import { Controller, Get, Req } from '@nestjs/common'
+import { Request } from 'express'
+import { SignakitService } from '../signakit/signakit.service'
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly signakit: SignakitService) {}
+
+  @Get('dashboard')
+  getDashboard(@Req() request: Request) {
+    const { id: userId, plan, country, betaTester } = request.user
+
+    const userCtx = this.signakit.createUserContext(userId, {
+      plan,
+      country,
+      betaTester,
+      $userAgent: request.headers['user-agent'] ?? '',
+    })
+
+    const newDashboard = userCtx.decide('new-dashboard')
+    const analyticsTab = userCtx.decide('analytics-tab')
+
+    return {
+      showNewDashboard: newDashboard?.enabled ?? false,
+      showAnalyticsTab: analyticsTab?.enabled ?? false,
+    }
+  }
+}
+```
+
+<Callout type="info">
+**Bot detection** — pass `$userAgent` as an attribute to enable automatic bot filtering. Bots receive the `off` variation and do not fire exposure events, keeping your experiment data clean.
+</Callout>
+
+---
+
+## A/B testing with variation keys
+
+When running an experiment, use `variationKey` to branch behavior between variations.
+
+```ts title="onboarding/onboarding.controller.ts"
+import { Controller, Get, Req } from '@nestjs/common'
+import { Request } from 'express'
+import { SignakitService } from '../signakit/signakit.service'
+
+@Controller('onboarding')
+export class OnboardingController {
+  constructor(private readonly signakit: SignakitService) {}
+
+  @Get('flow')
+  getOnboardingFlow(@Req() request: Request) {
+    const userId = request.user?.id ?? request.cookies['visitor_id'] ?? 'anonymous'
+    const decision = this.signakit.decide(userId, 'onboarding-redesign')
+
+    switch (decision?.variationKey) {
+      case 'treatment-a':
+        return { flow: 'guided', steps: 3 }
+      case 'treatment-b':
+        return { flow: 'checklist', steps: 5 }
+      default:
+        // null (flag off / user not targeted) or 'control'
+        return { flow: 'legacy', steps: 4 }
+    }
+  }
+}
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside a request handler or controller method | Re-fetches config on every request; defeats in-memory exposure dedup | Create the client once in `SignakitModule` via `useFactory` |
+| Calling `onReady()` inside a controller or service method | `onReady()` is a startup concern — calling it per-request adds latency | Await `onReady()` in the module factory; by request time the client is already ready |
+| `decide()` in `main.ts` before `NestFactory.create()` | NestJS DI is not available yet; the client exists outside the module graph | Use `OnModuleInit` or `useFactory` so the client lives inside the module lifecycle |
+| Not null-checking `decide()` return | `decide()` returns `null` when the flag is off or the user is not targeted; accessing `.enabled` throws | Always use `decision?.enabled ?? false` |
+| Creating a new `UserContext` per flag call with `createUserContext()` inside a tight loop | Minor overhead; also fires separate exposure events per context instance | Create one `UserContext` per request and call `decide()` multiple times on it |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/docs/flags/sdks/node)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Express guide →](/docs/flags/guides/express)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

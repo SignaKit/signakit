@@ -1,0 +1,27 @@
+{
+    "name": "signakit/flags-php",
+    "description": "Official PHP SDK for SignaKit Feature Flags",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.0",
+        "phpunit/phpunit": "^11.0"
+    },
+    "suggest": {
+        "guzzlehttp/guzzle": "Recommended HTTP client. Falls back to cURL if not installed."
+    },
+    "autoload": {
+        "psr-4": {
+            "SignaKit\\FlagsPhp\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "SignaKit\\FlagsPhp\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable"
+}

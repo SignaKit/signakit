@@ -1,0 +1,370 @@
+---
+title: Next.js Middleware
+description: Use SignaKit feature flags in Next.js proxy (middleware) to rewrite routes for A/B tests, gate beta access, and enforce maintenance mode — all before a page renders.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Next.js Middleware
+
+**SDK:** `@signakit/flags-node`
+**Next.js version:** 16+ (proxy.ts)
+
+Next.js proxy runs at the edge, before any page renders. That makes it the right place to:
+
+- **A/B test page implementations** — rewrite `/checkout` to `/checkout-v2` for the treatment group without the user seeing a URL change
+- **Gate beta access** — redirect users who lack the flag to a waitlist page
+- **Enforce maintenance mode** — redirect all traffic to a status page when a flag is on
+
+Proxy evaluates flags synchronously on the request path, so keep decisions fast and targeted. Only the routes that actually need a flag should pass through the proxy function.
+
+<Callout type="info" title="proxy.ts in Next.js 16">
+Starting with Next.js 16, `middleware.ts` has been renamed to `proxy.ts`. The file lives at the project root (or inside `src/` if you use that layout). The API is identical — `NextRequest`, `NextResponse`, and the `config` export with `matcher` work exactly as before. Only the filename changed.
+</Callout>
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```npm
+npm install @signakit/flags-node
+```
+
+Add your SDK key to `.env.local`:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create a module-level singleton
+
+Proxy is re-evaluated on every matched request. Create the SignaKit client once at module level so the flag config is fetched on cold start and reused across requests.
+
+```ts title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+
+export const signakit = client
+export const signakitReady = client.onReady()
+```
+
+The `signakitReady` promise is kicked off immediately when the module loads. By the time the first request hits proxy, the config is already resolved.
+
+</Step>
+
+</Steps>
+
+<Callout type="warning" title="Edge Runtime compatibility">
+`@signakit/flags-node` must be compatible with the Next.js Edge Runtime for use in `proxy.ts`. The Edge Runtime does not support all Node.js built-ins. If you see a runtime error on startup, check the [Edge Runtime compatibility note](#edge-runtime) below.
+</Callout>
+
+---
+
+## Reading the visitor ID
+
+Proxy has no access to `cookies()` from `next/headers` — you read cookies directly from the `NextRequest` object instead.
+
+```ts
+const visitorId = request.cookies.get('visitor_id')?.value
+```
+
+If `visitor_id` is absent (first visit), generate one and set it on the response cookie so subsequent requests are bucketed consistently. See the [Setting a visitor ID cookie](#setting-a-visitor-id-cookie) section for a complete example.
+
+---
+
+## Pattern 1 — A/B test via route rewrite
+
+Use `NextResponse.rewrite()` to transparently serve a different page implementation. The URL in the browser does not change — only the file that Next.js renders switches.
+
+```ts title="proxy.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+export async function proxy(request: NextRequest) {
+  await signakitReady
+
+  const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const decision = userCtx.decide('checkout-redesign')
+
+  if (decision?.variationKey === 'treatment') {
+    return NextResponse.rewrite(new URL('/checkout-v2', request.url))
+  }
+
+  return NextResponse.next()
+}
+
+export const config = {
+  matcher: ['/checkout'],
+}
+```
+
+The `matcher` is scoped to `/checkout` only. Proxy does not run on any other route, so there is no per-request overhead for unrelated traffic.
+
+<Callout type="info">
+The rewrite target (`/checkout-v2`) does not have to be a public URL. You can place it under `app/(experiments)/checkout-v2/page.tsx` and it will never be directly accessible — only reachable through the proxy rewrite.
+</Callout>
+
+---
+
+## Pattern 2 — Redirect-based gate (beta access)
+
+Use `NextResponse.redirect()` to send users to a different URL. Unlike a rewrite, the browser navigates and the URL bar changes.
+
+```ts title="proxy.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+export async function proxy(request: NextRequest) {
+  await signakitReady
+
+  const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const betaAccess = userCtx.decide('beta-dashboard')
+
+  if (!betaAccess?.enabled) {
+    return NextResponse.redirect(new URL('/beta-waitlist', request.url))
+  }
+
+  return NextResponse.next()
+}
+
+export const config = {
+  matcher: ['/dashboard/beta/:path*'],
+}
+```
+
+Users without the `beta-dashboard` flag enabled are redirected to `/beta-waitlist`. Users who are in the flag's audience pass through to the real dashboard.
+
+---
+
+## Pattern 3 — Maintenance mode
+
+A maintenance mode flag lets you redirect all traffic instantly from the dashboard without a deploy.
+
+```ts title="proxy.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+// These paths are always allowed through — the status page itself must not redirect
+const ALWAYS_ALLOW = ['/maintenance', '/api/health']
+
+export async function proxy(request: NextRequest) {
+  const pathname = request.nextUrl.pathname
+
+  if (ALWAYS_ALLOW.some((p) => pathname.startsWith(p))) {
+    return NextResponse.next()
+  }
+
+  await signakitReady
+
+  // Use a fixed system key so every user gets the same result
+  const userCtx = signakit.createUserContext('system')
+  const maintenance = userCtx.decide('maintenance-mode')
+
+  if (maintenance?.enabled) {
+    return NextResponse.redirect(new URL('/maintenance', request.url))
+  }
+
+  return NextResponse.next()
+}
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+}
+```
+
+<Callout type="warning" title="Avoid redirect loops">
+Always allow the maintenance page path through before checking the flag. If the redirect target is also matched by the proxy, you will create an infinite redirect loop.
+</Callout>
+
+---
+
+## Setting a visitor ID cookie
+
+Proxy is also a natural place to assign `visitor_id` to first-time visitors. Do this in the same pass so you do not need a separate proxy just for cookie assignment.
+
+```ts title="proxy.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+function generateId(): string {
+  // crypto.randomUUID() is available in the Edge Runtime
+  return crypto.randomUUID()
+}
+
+export async function proxy(request: NextRequest) {
+  await signakitReady
+
+  const existingId = request.cookies.get('visitor_id')?.value
+  const visitorId = existingId ?? generateId()
+
+  const userCtx = signakit.createUserContext(visitorId)
+  const decision = userCtx.decide('homepage-redesign')
+
+  let response: NextResponse
+
+  if (decision?.variationKey === 'treatment') {
+    response = NextResponse.rewrite(new URL('/homepage-v2', request.url))
+  } else {
+    response = NextResponse.next()
+  }
+
+  // Set visitor_id on first visit
+  if (!existingId) {
+    response.cookies.set('visitor_id', visitorId, {
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 60 * 60 * 24 * 365, // 1 year
+      path: '/',
+    })
+  }
+
+  return response
+}
+
+export const config = {
+  matcher: ['/'],
+}
+```
+
+Because the cookie is set on the response, the browser sends it on the next request — the same user gets the same bucket going forward.
+
+---
+
+## Passing flag results to the page via headers
+
+If you need the flag decision available in a server component without re-evaluating it, forward the result as a request header inside the rewrite.
+
+```ts title="proxy.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+export async function proxy(request: NextRequest) {
+  await signakitReady
+
+  const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const decision = userCtx.decide('checkout-redesign')
+
+  const requestHeaders = new Headers(request.headers)
+  requestHeaders.set('x-signakit-checkout', decision?.variationKey ?? 'control')
+
+  return NextResponse.next({
+    request: { headers: requestHeaders },
+  })
+}
+
+export const config = {
+  matcher: ['/checkout/:path*'],
+}
+```
+
+Read the header in your server component via `headers()`:
+
+```ts title="app/checkout/page.tsx"
+import { headers } from 'next/headers'
+
+export default async function CheckoutPage() {
+  const headerStore = await headers()
+  const variation = headerStore.get('x-signakit-checkout') ?? 'control'
+
+  return variation === 'treatment' ? <CheckoutV2 /> : <LegacyCheckout />
+}
+```
+
+<Callout type="info">
+This pattern avoids a second `decide()` call in the server component. Use it when the server component logic is complex and you want a single authoritative evaluation point at the proxy layer.
+</Callout>
+
+---
+
+## Edge Runtime
+
+<a id="edge-runtime"></a>
+
+Next.js proxy runs in the **Edge Runtime** — a restricted environment based on Web APIs, not the full Node.js runtime. The following constraints apply:
+
+- `crypto.randomUUID()` is available natively (no import needed)
+- `fetch` is available natively
+- Node.js built-ins like `fs`, `net`, `child_process`, and native addons are **not** available
+- `process.env` is available for environment variables
+
+`@signakit/flags-node` performs a `fetch` to the SignaKit CDN on startup and evaluates flags locally in memory. Neither of those operations require Node.js-specific APIs. However, if the SDK uses any Node.js built-ins internally, Next.js will throw a build-time error like:
+
+```
+Error: The edge runtime does not support Node.js 'X' module.
+```
+
+If you hit this, add `@signakit/flags-node` to the `serverExternalPackages` list in `next.config.ts` to opt it out of Edge bundling, and switch to a Node.js Runtime route handler to drive the flag decision instead of proxy.
+
+---
+
+## Keeping the matcher narrow
+
+The `matcher` config is the most important performance lever in proxy. Every request whose path matches runs your entire proxy function — including the `await signakitReady` and `decide()` call.
+
+```ts
+// ✅ Narrow: only runs on the two paths that need flag gating
+export const config = {
+  matcher: ['/checkout', '/dashboard/beta/:path*'],
+}
+
+// ❌ Broad: runs on every request, including static assets
+export const config = {
+  matcher: ['/:path*'],
+}
+```
+
+To exclude static assets and API routes from a broad matcher, use a negative lookahead:
+
+```ts
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|api/|favicon.ico).*)'],
+}
+```
+
+<Callout type="warning" title="Never use decideAll() in proxy">
+`decideAll()` evaluates every flag in your project and fires an `$exposure` event for each one the user is bucketed into. In proxy, which runs on every matched request, this means exposure events multiply by your total traffic — and evaluating every flag is slower than evaluating one. Always use `decide('specific-flag-key')` in proxy.
+</Callout>
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside the `proxy` function | Re-fetches config on every request; dedup resets each call | Create the singleton in `lib/signakit.ts`, import it |
+| `decideAll()` in proxy | Evaluates all flags on every request; causes event volume spikes | Use `decide('specific-flag')` |
+| No `await signakitReady` | `decide()` returns `null` if config has not loaded; every user gets control | `await signakitReady` at the top of the function |
+| Redirect target matched by the same `matcher` | Infinite redirect loop | Add the redirect destination to an allow-list before checking the flag |
+| Broad `matcher: ['/:path*']` with no exclusions | Proxy runs on `/_next/static`, image requests, and other static files unnecessarily | Use a negative lookahead to exclude static paths |
+| Passing `userId` from an untrusted query param | Users can spoof their bucket by manipulating the URL | Read the bucket key from a signed cookie or your auth session only |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/docs/flags/sdks/node)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

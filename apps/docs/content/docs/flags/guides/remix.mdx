@@ -1,0 +1,367 @@
+---
+title: Remix
+description: Integrate SignaKit feature flags into a Remix application — evaluate flags in loaders, track conversions in actions, and manage visitor identity with cookies.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Remix
+
+**SDK:** `@signakit/flags-node`  
+**Remix version:** 2+
+
+In Remix, all flag evaluation lives in `loader` and `action` functions — never in component code directly. Loaders run on the server, return flag decisions as part of loader data, and components consume that data via `useLoaderData()`. This keeps the SDK server-only, costs zero bytes in the client bundle, and means there's no loading state or layout shift.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```npm
+npm install @signakit/flags-node
+```
+
+Add your SDK key to `.env`:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create a module-level singleton
+
+Remix uses a `.server.ts` suffix convention to guarantee a file never gets bundled into the client. Create the singleton there so Remix's compiler strips it from the browser build automatically — no `typeof window` guards needed.
+
+```ts title="app/lib/signakit.server.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+
+// Kick off the config fetch immediately — resolves before the first request
+export const signakit = client
+export const signakitReady = client.onReady()
+```
+
+The `signakitReady` promise is created once at module load time. In a long-running Remix server it resolves on first import and stays resolved for the process lifetime. In a serverless deploy it resolves during the cold-start phase.
+
+</Step>
+
+<Step>
+
+### Create a visitor ID helper
+
+SignaKit uses `userId` as the bucketing key. The same ID always produces the same variation assignment — consistent across requests, sessions, and re-renders.
+
+For anonymous visitors, read a stable `visitor_id` cookie. For authenticated users, use the session's user ID.
+
+```ts title="app/lib/visitor.server.ts"
+import { createCookie } from '@remix-run/node'
+import { v4 as uuid } from 'uuid'
+
+export const visitorCookie = createCookie('visitor_id', {
+  maxAge: 60 * 60 * 24 * 365, // 1 year
+  httpOnly: true,
+  sameSite: 'lax',
+  path: '/',
+})
+
+export async function getOrCreateVisitorId(request: Request): Promise<{
+  visitorId: string
+  setCookie: string | null
+}> {
+  const cookieHeader = request.headers.get('Cookie')
+  const existing = await visitorCookie.parse(cookieHeader)
+
+  if (existing) {
+    return { visitorId: existing, setCookie: null }
+  }
+
+  const newId = uuid()
+  const setCookie = await visitorCookie.serialize(newId)
+  return { visitorId: newId, setCookie }
+}
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating a flag in a loader
+
+Evaluate the flag in the `loader`, include the decision in the returned data, and read it with `useLoaderData()` in the component.
+
+```ts title="app/routes/checkout.tsx"
+import { json, type LoaderFunctionArgs } from '@remix-run/node'
+import { useLoaderData } from '@remix-run/react'
+import { signakit, signakitReady } from '~/lib/signakit.server'
+import { getOrCreateVisitorId } from '~/lib/visitor.server'
+import { CheckoutV2 } from '~/components/checkout-v2'
+import { LegacyCheckout } from '~/components/checkout-legacy'
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  await signakitReady
+
+  const { visitorId, setCookie } = await getOrCreateVisitorId(request)
+  const userCtx = signakit.createUserContext(visitorId)
+  const checkout = userCtx.decide('checkout-redesign')
+
+  const headers: Record<string, string> = {}
+  if (setCookie) {
+    headers['Set-Cookie'] = setCookie
+  }
+
+  return json(
+    { checkoutVariation: checkout?.variationKey ?? 'control' },
+    { headers },
+  )
+}
+
+export default function CheckoutPage() {
+  const { checkoutVariation } = useLoaderData<typeof loader>()
+
+  return checkoutVariation === 'treatment' ? <CheckoutV2 /> : <LegacyCheckout />
+}
+```
+
+<Callout type="info">
+**With an authenticated session** — if you use Remix's session-based auth, pass the session user ID and any user attributes you want to target on:
+
+```ts
+import { getSession } from '~/lib/session.server'
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  await signakitReady
+
+  const session = await getSession(request.headers.get('Cookie'))
+  const userId = session.get('userId')
+
+  const { visitorId, setCookie } = await getOrCreateVisitorId(request)
+  const buckId = userId ?? visitorId
+
+  const userCtx = signakit.createUserContext(buckId, {
+    plan: session.get('plan') ?? 'free',
+    $userAgent: request.headers.get('User-Agent') ?? undefined,
+  })
+
+  const checkout = userCtx.decide('checkout-redesign')
+  // ...
+}
+```
+</Callout>
+
+---
+
+## Tracking conversion events in an action
+
+Track a conversion inside an `action` function. The user context is recreated from the same visitor ID, so the event is attributed to the same bucket the user was assigned to in the loader.
+
+```ts title="app/routes/checkout.tsx"
+import {
+  json,
+  redirect,
+  type ActionFunctionArgs,
+  type LoaderFunctionArgs,
+} from '@remix-run/node'
+import { Form, useLoaderData } from '@remix-run/react'
+import { signakit, signakitReady } from '~/lib/signakit.server'
+import { getOrCreateVisitorId } from '~/lib/visitor.server'
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  await signakitReady
+  const { visitorId, setCookie } = await getOrCreateVisitorId(request)
+  const userCtx = signakit.createUserContext(visitorId)
+  const checkout = userCtx.decide('checkout-redesign')
+
+  const headers: Record<string, string> = {}
+  if (setCookie) headers['Set-Cookie'] = setCookie
+
+  return json(
+    { checkoutVariation: checkout?.variationKey ?? 'control' },
+    { headers },
+  )
+}
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData()
+  const amount = Number(formData.get('amount'))
+
+  const { visitorId } = await getOrCreateVisitorId(request)
+  const userCtx = signakit.createUserContext(visitorId)
+  await userCtx.trackEvent('purchase_completed', { value: amount })
+
+  return redirect('/checkout/confirmation')
+}
+
+export default function CheckoutPage() {
+  const { checkoutVariation } = useLoaderData<typeof loader>()
+
+  return (
+    <main>
+      {checkoutVariation === 'treatment' ? <CheckoutV2 /> : <LegacyCheckout />}
+      <Form method="post">
+        <input type="hidden" name="amount" value="99" />
+        <button type="submit">Complete purchase</button>
+      </Form>
+    </main>
+  )
+}
+```
+
+<Callout type="warning">
+**Recreate the user context in every loader and action.** `createUserContext()` is cheap — it does no I/O. Do not try to pass a `UserContext` instance across the loader/action boundary or cache it in module scope between requests.
+</Callout>
+
+---
+
+## Evaluating multiple flags
+
+When a route needs more than one flag, evaluate them all in a single loader call. Each `decide()` call is local and synchronous — there's no extra latency.
+
+```ts title="app/routes/dashboard.tsx"
+import { json, type LoaderFunctionArgs } from '@remix-run/node'
+import { useLoaderData } from '@remix-run/react'
+import { signakit, signakitReady } from '~/lib/signakit.server'
+import { getOrCreateVisitorId } from '~/lib/visitor.server'
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  await signakitReady
+
+  const { visitorId, setCookie } = await getOrCreateVisitorId(request)
+  const userCtx = signakit.createUserContext(visitorId)
+
+  const newNav = userCtx.decide('redesigned-nav')
+  const betaDashboard = userCtx.decide('beta-dashboard')
+  const pricingTable = userCtx.decide('new-pricing-table')
+
+  const headers: Record<string, string> = {}
+  if (setCookie) headers['Set-Cookie'] = setCookie
+
+  return json(
+    {
+      showNewNav: newNav?.enabled ?? false,
+      showBetaDashboard: betaDashboard?.enabled ?? false,
+      pricingVariation: pricingTable?.variationKey ?? 'control',
+    },
+    { headers },
+  )
+}
+
+export default function DashboardPage() {
+  const { showNewNav, showBetaDashboard, pricingVariation } =
+    useLoaderData<typeof loader>()
+
+  return (
+    <main>
+      {showNewNav ? <NewNav /> : <LegacyNav />}
+      {showBetaDashboard ? <BetaDashboard /> : <Dashboard />}
+      {pricingVariation === 'treatment' ? <NewPricingTable /> : <PricingTable />}
+    </main>
+  )
+}
+```
+
+---
+
+## A/B testing with variationKey
+
+When a flag is running as an experiment, branch on `variationKey` to serve each variation. The SDK fires an `$exposure` event automatically on the first `decide()` call for each user/flag pair within the SDK instance's lifetime.
+
+```ts title="app/routes/onboarding.tsx"
+import { json, type LoaderFunctionArgs } from '@remix-run/node'
+import { useLoaderData } from '@remix-run/react'
+import { signakit, signakitReady } from '~/lib/signakit.server'
+import { getOrCreateVisitorId } from '~/lib/visitor.server'
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  await signakitReady
+
+  const { visitorId } = await getOrCreateVisitorId(request)
+  const userCtx = signakit.createUserContext(visitorId)
+  const onboarding = userCtx.decide('onboarding-flow')
+
+  return json({ onboardingVariation: onboarding?.variationKey ?? 'control' })
+}
+
+export default function OnboardingPage() {
+  const { onboardingVariation } = useLoaderData<typeof loader>()
+
+  switch (onboardingVariation) {
+    case 'treatment-short':
+      return <ShortOnboarding />
+    case 'treatment-video':
+      return <VideoOnboarding />
+    default:
+      return <StandardOnboarding />
+  }
+}
+```
+
+---
+
+## Route-level flag gating
+
+To redirect or rewrite a route based on a flag before rendering, do it at the top of the loader:
+
+```ts title="app/routes/beta.tsx"
+import { redirect, type LoaderFunctionArgs } from '@remix-run/node'
+import { signakit, signakitReady } from '~/lib/signakit.server'
+import { getOrCreateVisitorId } from '~/lib/visitor.server'
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  await signakitReady
+
+  const { visitorId } = await getOrCreateVisitorId(request)
+  const userCtx = signakit.createUserContext(visitorId)
+  const betaAccess = userCtx.decide('beta-dashboard')
+
+  if (!betaAccess?.enabled) {
+    throw redirect('/')
+  }
+
+  return null
+}
+
+export default function BetaPage() {
+  return <BetaDashboard />
+}
+```
+
+<Callout type="info">
+Remix's `loader` runs before the component renders, so a `redirect()` thrown here prevents the component from mounting at all — no flash of the gated content.
+</Callout>
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside a loader or action | Re-fetches config on every request; loses per-instance exposure deduplication | Create once in `app/lib/signakit.server.ts`, import the singleton |
+| Importing `signakit.server.ts` from a component file | Remix may include server code in the client bundle if the import chain reaches a component | Only import from `.server.ts` files or route modules (`loader`, `action`) |
+| Not awaiting `signakitReady` before `decide()` | `decide()` returns `null` if the config hasn't loaded yet | `await signakitReady` at the top of every loader that evaluates flags |
+| Caching a `UserContext` in module scope between requests | User context carries per-user state — sharing it across requests leaks identity | Always call `createUserContext()` per request |
+| Calling `decideAll()` in a loader used by every route | Evaluates every flag for every visitor; causes event volume spikes | Use `decide('specific-flag')` and only evaluate what the route needs |
+| Evaluating flags inside a component with `clientLoader` | Runs in the browser where the Node SDK is unavailable | Evaluate in the server `loader` and pass results via `useLoaderData()` |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/docs/flags/sdks/node)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Express guide →](/docs/flags/guides/express)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

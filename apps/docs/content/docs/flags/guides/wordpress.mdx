@@ -1,0 +1,328 @@
+---
+title: WordPress
+description: Integrate SignaKit feature flags into a WordPress site — Composer install, singleton helper, anonymous visitor bucketing, template evaluation, shortcodes, and WooCommerce conversion tracking.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# WordPress
+
+**SDK:** `signakit/flags-php`  
+**PHP version:** 8.1+  
+**WordPress version:** 6.0+
+
+The `signakit/flags-php` package works in WordPress with no framework-specific adapter required. The recommended pattern is to register a singleton helper function `signakit_client()` in a plugin file or `functions.php`, initialize via `add_action('init', ...)` at high priority, and call `signakit_client()->createUserContext($userId)->decide('flag-key')` anywhere you need a decision.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```bash
+composer require signakit/flags-php
+```
+
+Guzzle is recommended for better HTTP handling. If it is already a project dependency the SDK uses it automatically. Otherwise it falls back to cURL with no extra dependencies.
+
+```bash
+composer require guzzlehttp/guzzle
+```
+
+If your WordPress install does not already use Composer, you can drop a `composer.json` in the project root and run `composer install` there, then require the generated autoloader from your plugin.
+
+<Callout type="warning" title="Composer is required for the recommended setup">
+The steps below assume Composer manages the autoloader. If your host does not support Composer, see [Manual install without Composer](#manual-install-without-composer) below.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Store your SDK key as a constant
+
+Add your SDK key to `wp-config.php` so it is available across your entire WordPress install without being committed to a theme or plugin repository.
+
+```php title="wp-config.php"
+define('SIGNAKIT_SDK_KEY', 'sk_dev_yourOrgId_yourProjectId_random');
+```
+
+<Callout type="danger" title="Never commit your production SDK key">
+Use a `sk_dev_…` key in development and a `sk_prod_…` key in production. Set the production key through your hosting platform's environment configuration, not in a file that gets committed to version control.
+</Callout>
+
+Alternatively, read from an environment variable:
+
+```php title="wp-config.php"
+define('SIGNAKIT_SDK_KEY', getenv('SIGNAKIT_SDK_KEY') ?: 'sk_dev_yourOrgId_yourProjectId_random');
+```
+
+</Step>
+
+<Step>
+
+### Create the singleton helper
+
+Create a plugin file (or add to your theme's `functions.php`) that bootstraps the client once and exposes it through a `signakit_client()` helper. Using a plugin file is preferred so the SDK is available regardless of which theme is active.
+
+```php title="wp-content/plugins/signakit-flags/signakit-flags.php"
+<?php
+/**
+ * Plugin Name: SignaKit Flags
+ * Description: Feature flags via signakit/flags-php
+ * Version:     1.0.0
+ */
+
+declare(strict_types=1);
+
+// Load Composer autoloader — adjust the path if composer.json lives elsewhere.
+require_once dirname(__DIR__, 3) . '/vendor/autoload.php';
+
+use SignaKit\FlagsPhp\SignaKitClient;
+
+/**
+ * Returns the shared SignaKitClient instance.
+ * Returns null if the client failed to initialize (flags off = safe default).
+ */
+function signakit_client(): ?SignaKitClient
+{
+    static $client = null;
+    static $failed = false;
+
+    if ($failed) {
+        return null;
+    }
+
+    if ($client === null) {
+        $client = new SignaKitClient(sdkKey: SIGNAKIT_SDK_KEY);
+
+        try {
+            $client->initialize();
+        } catch (\RuntimeException $e) {
+            error_log('[SignaKit] Failed to initialize: ' . $e->getMessage());
+            $client = null;
+            $failed = true;
+        }
+    }
+
+    return $client;
+}
+
+// Initialize early in the WordPress request lifecycle.
+add_action('init', function (): void {
+    signakit_client(); // warm up the singleton; no-op on subsequent calls
+}, 1);
+```
+
+The `static` variables inside `signakit_client()` act as a per-process singleton — `initialize()` is called exactly once. If it fails, the function returns `null` on every subsequent call so any null-check at the call site degrades gracefully with flags off.
+
+</Step>
+
+<Step>
+
+### Resolve a stable user ID
+
+SignaKit uses `userId` as the bucketing key. The same ID always produces the same variation. Use the WordPress user ID for logged-in users and a persistent cookie for anonymous visitors.
+
+Add this helper to the same plugin file:
+
+```php title="wp-content/plugins/signakit-flags/signakit-flags.php"
+/**
+ * Returns a stable identifier for the current visitor.
+ * Logged-in users → WordPress user ID.
+ * Anonymous users → persistent visitor_id cookie (set on first visit).
+ */
+function signakit_user_id(): string
+{
+    $wpUserId = get_current_user_id();
+
+    if ($wpUserId !== 0) {
+        return (string) $wpUserId;
+    }
+
+    // Anonymous visitor — read or create a persistent cookie.
+    if (!empty($_COOKIE['visitor_id'])) {
+        return sanitize_text_field(wp_unslash($_COOKIE['visitor_id']));
+    }
+
+    $visitorId = wp_generate_uuid4();
+
+    setcookie('visitor_id', $visitorId, [
+        'expires'  => time() + YEAR_IN_SECONDS,
+        'path'     => '/',
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+
+    // Make it available to the current request too.
+    $_COOKIE['visitor_id'] = $visitorId;
+
+    return $visitorId;
+}
+```
+
+<Callout type="warning" title="setcookie() must be called before any output">
+WordPress can buffer output or call `wp_head` before your code runs. Hook into `send_headers` (priority 1) if you need to guarantee the cookie is sent before headers are flushed, or call `signakit_user_id()` early in the `init` action at priority 1.
+</Callout>
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating a flag in a template
+
+Call `signakit_client()` anywhere in your theme templates. Always null-check the return value — if initialization failed, `signakit_client()` returns `null` and you fall back to the default experience.
+
+```php title="wp-content/themes/your-theme/template-parts/hero.php"
+<?php
+$client   = signakit_client();
+$userId   = signakit_user_id();
+
+$heroFlag = $client?->createUserContext($userId)->decide('homepage-hero');
+
+if ($heroFlag?->variationKey === 'treatment') :
+?>
+    <section class="hero hero--new">
+        <h1>New headline that converts better</h1>
+    </section>
+<?php else : ?>
+    <section class="hero">
+        <h1>Original headline</h1>
+    </section>
+<?php endif; ?>
+```
+
+Passing user attributes improves targeting precision:
+
+```php
+$currentUser = wp_get_current_user();
+
+$ctx = signakit_client()?->createUserContext(
+    userId: signakit_user_id(),
+    attributes: [
+        'role'       => implode(',', $currentUser->roles ?? []),
+        '$userAgent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+    ],
+);
+
+$decision = $ctx?->decide('members-only-banner');
+```
+
+The `$userAgent` attribute enables automatic bot detection — bots receive the `off` variation and do not fire exposure events.
+
+---
+
+## Shortcode integration
+
+Wrap flag logic in a shortcode so content editors can gate blocks of content without writing PHP.
+
+```php title="wp-content/plugins/signakit-flags/signakit-flags.php"
+/**
+ * Usage: [signakit_flag name="flag-key"]Show this when flag is on[/signakit_flag]
+ */
+add_shortcode('signakit_flag', function (array $atts, ?string $content = ''): string {
+    $atts = shortcode_atts(['name' => ''], $atts, 'signakit_flag');
+
+    if (empty($atts['name'])) {
+        return '';
+    }
+
+    $client   = signakit_client();
+    $decision = $client?->createUserContext(signakit_user_id())->decide($atts['name']);
+
+    if ($decision?->enabled) {
+        return do_shortcode((string) $content);
+    }
+
+    return '';
+});
+```
+
+Use it in post content or widget text:
+
+```
+[signakit_flag name="summer-sale-banner"]
+  <p>Summer sale — 20% off everything this week!</p>
+[/signakit_flag]
+```
+
+---
+
+## WooCommerce conversion tracking
+
+Hook into WooCommerce's order-complete action to track purchases as conversion events. The event is attributed to the same user ID that was bucketed during the experiment, keeping the attribution chain intact.
+
+```php title="wp-content/plugins/signakit-flags/signakit-flags.php"
+add_action('woocommerce_payment_complete', function (int $orderId): void {
+    $client = signakit_client();
+    if ($client === null) {
+        return;
+    }
+
+    $order = wc_get_order($orderId);
+    if (!$order instanceof \WC_Order) {
+        return;
+    }
+
+    // Use the WordPress user ID if the purchaser was logged in.
+    $wpUserId = (int) $order->get_customer_id();
+    $userId   = $wpUserId !== 0
+        ? (string) $wpUserId
+        : (string) ($order->get_meta('_signakit_visitor_id') ?: 'anonymous');
+
+    $ctx = $client->createUserContext($userId);
+    $ctx->trackEvent('purchase_completed', (float) $order->get_total());
+});
+```
+
+<Callout type="info" title="Storing visitor_id on the order">
+For anonymous-to-purchase attribution, save the `visitor_id` cookie to the order when it is created. Hook into `woocommerce_checkout_order_created` and call `$order->update_meta_data('_signakit_visitor_id', $_COOKIE['visitor_id'] ?? '')`.
+</Callout>
+
+---
+
+## Manual install without Composer
+
+If your WordPress environment does not support Composer, you can install the SDK manually:
+
+1. Download the latest `signakit-flags-php-*.zip` from the [GitHub releases page](https://github.com/signakit/flags-php/releases).
+2. Extract it into `wp-content/plugins/signakit-flags/vendor/signakit/flags-php/`.
+3. Replace the `require_once` at the top of the plugin file:
+
+```php title="wp-content/plugins/signakit-flags/signakit-flags.php"
+// Manual install — no Composer
+require_once __DIR__ . '/vendor/signakit/flags-php/src/autoload.php';
+```
+
+<Callout type="warning" title="Manual installs require manual updates">
+You will not receive security patches or bug fixes automatically. Use Composer where possible and pin to a specific version (`composer require signakit/flags-php:^1.0`).
+</Callout>
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `new SignaKitClient()` inside a template or shortcode callback | Re-fetches config on every request; no exposure deduplication | Use `signakit_client()` which returns the shared singleton |
+| Calling `initialize()` inside `the_content` or template hooks | Runs a blocking CDN call mid-render | Initialize in `add_action('init', ..., 1)` so the config is ready before templates execute |
+| Using `decideAll()` in a hook that runs on every request | Evaluates every flag on every request — N flags × all traffic = large event volume | Use `decide('specific-flag')` for only the flags the current template needs |
+| Passing a different `$userId` to `trackEvent()` than to `decide()` | Conversion is attributed to the wrong user; breaks experiment results | Call `signakit_user_id()` once at the top of the request and pass the result through |
+| Not null-checking `signakit_client()` return value | Fatal error if initialization failed and `$client` is `null` | Always use the null-safe operator: `signakit_client()?->createUserContext(...)` |
+
+---
+
+## Related
+
+- [PHP SDK reference →](/docs/flags/sdks/php)
+- [Symfony integration guide →](/docs/flags/guides/symfony)
+- [Laravel integration guide →](/docs/flags/guides/laravel-guide)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Quickstart →](/docs/flags/quickstart)

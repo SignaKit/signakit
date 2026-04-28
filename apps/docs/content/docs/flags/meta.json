@@ -1,0 +1,12 @@
+{
+  "title": "Flags",
+  "root": true,
+  "pages": [
+    "index",
+    "quickstart",
+    "concepts",
+    "sdks",
+    "guides",
+    "changelog"
+  ]
+}

@@ -1,0 +1,186 @@
+---
+title: Targeted Delivery
+description: Roll out features to specific user segments with audience rules and percentage-based targeting.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+
+# Targeted Delivery
+
+Targeted delivery lets you enable a feature for specific users or segments while leaving it off for everyone else. You define who qualifies using attribute-based rules, percentage rollouts, or a combination of both — all without touching your code or redeploying.
+
+---
+
+## Passing user attributes
+
+Every targeting decision starts with a user context. When you call `createUserContext`, the second argument is a flat key/value map of attributes describing that user.
+
+<Tabs items={['Node.js', 'React', 'Python', 'Go']}>
+
+<Tab>
+```typescript title="server.ts"
+const userCtx = client.createUserContext('user-123', {
+  plan: 'pro',
+  country: 'US',
+  role: 'admin',
+  accountAge: 120,
+})
+
+const decision = userCtx.decide('new-dashboard')
+```
+</Tab>
+
+<Tab>
+```tsx title="App.tsx"
+<SignaKitProvider
+  sdkKey="sk_dev_xxxx"
+  userId="user-123"
+  attributes={{
+    plan: 'pro',
+    country: 'US',
+    role: 'admin',
+    accountAge: 120,
+  }}
+>
+  <App />
+</SignaKitProvider>
+```
+</Tab>
+
+<Tab>
+```python title="server.py"
+user = client.create_user_context("user-123", {
+    "plan": "pro",
+    "country": "US",
+    "role": "admin",
+    "account_age": 120,
+})
+
+decision = user.decide("new-dashboard")
+```
+</Tab>
+
+<Tab>
+```go title="server.go"
+user := client.CreateUserContext("user-123", map[string]interface{}{
+    "plan":       "pro",
+    "country":    "US",
+    "role":       "admin",
+    "accountAge": 120,
+})
+
+decision := user.Decide("new-dashboard")
+```
+</Tab>
+
+</Tabs>
+
+Attribute keys can be any string. Values can be strings, numbers, or booleans. You reference these same keys when building targeting rules in the dashboard.
+
+<Callout type="info">
+  Targeting is evaluated locally inside the SDK — there is no server round-trip at decision time. The full flag configuration, including all rules and conditions, is fetched from the CDN at startup and cached in memory. `decide()` runs against that cached config.
+</Callout>
+
+---
+
+## How targeting rules work
+
+Each flag can have one or more targeting rules. Rules are evaluated in order from top to bottom. The first rule whose conditions all match wins, and the flag's state for that rule is returned. If no rule matches, the flag falls back to its default state (on or off).
+
+### Rule conditions
+
+A rule condition compares a user attribute against a value using an operator. Available operators:
+
+| Operator | Description |
+|---|---|
+| `equals` | Exact match |
+| `not_equals` | Does not match |
+| `contains` | String contains substring |
+| `not_contains` | String does not contain substring |
+| `greater_than` | Numeric greater than |
+| `less_than` | Numeric less than |
+| `semver_greater_than` | Semantic version greater than (e.g. `"2.1.0"`) |
+| `semver_less_than` | Semantic version less than |
+
+A rule can have multiple conditions. All conditions in a rule must match for the rule to apply (AND logic).
+
+### Example rule set
+
+Consider a flag with three rules evaluated in this order:
+
+1. **Internal testers** — `role equals internal` → flag **on**
+2. **Pro plan, US only** — `plan equals pro` AND `country equals US` → flag **on**
+3. **Default** — no conditions → flag **off**
+
+A user with `{ role: 'admin', plan: 'pro', country: 'US' }` does not match rule 1 (`role` is not `internal`), matches rule 2, and gets the flag on. The default rule is never reached.
+
+<Callout type="info">
+  Rule order matters. Put your most specific or highest-priority rules first. Once a rule matches, evaluation stops — later rules are not checked.
+</Callout>
+
+---
+
+## Percentage rollouts
+
+A percentage rollout enables a flag for a defined fraction of users — say, 10% — without you picking which users. SignaKit uses deterministic bucketing: it hashes `userId + flagKey` into a bucket from 0 to 99. A user always lands in the same bucket, so they get a consistent experience across sessions and devices.
+
+Set the rollout percentage in the dashboard on a per-rule basis. A rule set to 25% will be enabled for the same 25% of users every time, regardless of when or where `decide()` is called.
+
+### Gradual rollout
+
+Deterministic bucketing makes gradual rollouts safe:
+
+1. Start at **5%** — monitor error rates and performance.
+2. Increase to **25%** — expand to a larger sample.
+3. Move to **100%** — full release.
+
+Each increase includes all users from the prior step plus new ones. No user who had the flag enabled will lose it as you increase the percentage.
+
+<Callout type="info">
+  You change the rollout percentage in the dashboard. No code changes or redeployment needed. The SDK picks up the updated config within seconds via the CDN.
+</Callout>
+
+---
+
+## Combining rules with percentage rollouts
+
+Rules and percentage rollouts compose. A single rule can both target a specific audience and apply a percentage rollout within that audience.
+
+**Example:** Roll out a new checkout flow to 20% of Pro plan users in the US.
+
+- Rule 1: `plan equals pro` AND `country equals US` → **20% rollout**
+- Default: flag **off**
+
+Only users who match the rule conditions are eligible for the rollout. Users who don't match never enter the bucket pool. This lets you run a controlled rollout to a high-value segment without exposing the feature to users outside it.
+
+You can stack multiple rules to run parallel targeted rollouts:
+
+- Rule 1: `plan equals enterprise` → **100%** (all enterprise users get it immediately)
+- Rule 2: `plan equals pro` AND `country equals US` → **50% rollout**
+- Rule 3: `plan equals pro` → **10% rollout** (non-US Pro users)
+- Default: flag **off**
+
+---
+
+## What makes a good targeting attribute
+
+Not all attributes are equally useful for targeting. Good attributes are:
+
+- **Stable.** A user's `plan` or `country` doesn't change mid-session. Avoid attributes that flip frequently.
+- **Available at decision time.** The attribute must be present in the user context when `decide()` is called. If you don't have the value yet (e.g., it's loaded asynchronously), the condition will not match.
+- **Low cardinality for rule conditions.** Attributes like `plan` (`free`, `pro`, `enterprise`) or `country` (`US`, `GB`) work well in `equals` conditions. High-cardinality values like `userId` or `email` are better expressed as audience lists.
+- **Numeric for threshold rules.** Use numbers for `greater_than` / `less_than` conditions. `accountAge: 120` (days) is directly comparable. String `"120"` is not.
+
+<Callout type="warning">
+  Attributes are not validated by the SDK. If you pass `accountAge: "120"` (a string) but your rule uses `greater_than 90`, the condition will not match as expected. Use the correct type.
+</Callout>
+
+---
+
+## Related
+
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how flag config is fetched and evaluation works end-to-end
+- [Audiences](/docs/flags/concepts/audiences) — reusable targeting groups you can reference across multiple flags
+- [A/B Testing](/docs/flags/concepts/ab-testing) — assigning users to variations and measuring results
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — how the SDK fetches and caches flag config from the CDN

@@ -1,0 +1,352 @@
+---
+title: Node
+description: Full API reference for @signakit/flags-node — server-side feature flags with local evaluation for Node.js, Next.js, Express, Fastify, and NestJS.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Node.js SDK
+
+**Package:** `@signakit/flags-node`  
+**Registry:** npm  
+**Minimum Node version:** 18+
+
+The Node.js SDK fetches your flag configuration from the SignaKit CDN once on startup, then evaluates all flags **locally** on each request — no network call per evaluation. Exposure and conversion events are fired asynchronously and do not block your request path.
+
+---
+
+## Installation
+
+```npm
+npm install @signakit/flags-node
+```
+
+Set your SDK key as an environment variable:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+---
+
+## Initialization
+
+Create the client **once at module level** — not inside a request handler. A module-level singleton reuses the fetched config across all requests within the same process lifetime and ensures in-memory exposure deduplication works correctly.
+
+```ts title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+
+export { client }
+```
+
+<Callout type="danger" title="Anti-pattern: client per request">
+
+```ts
+// ❌ Never do this — bypasses dedup, re-fetches config on every request
+export async function handler(req, res) {
+  const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+  await client.onReady()
+  // ...
+}
+```
+
+Initialize once at module level and import the singleton.
+
+</Callout>
+
+### `createInstance(config)`
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `sdkKey` | `string` | required | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `timeout` | `number` | `3000` | Config fetch timeout in milliseconds |
+| `retries` | `number` | `3` | Number of fetch retries on failure |
+
+---
+
+## Waiting for the client to be ready
+
+Call `onReady()` before evaluating flags. It resolves once the config is fetched from the CDN — or immediately if the config is already cached.
+
+```ts
+const { success, reason } = await client.onReady()
+
+if (!success) {
+  console.error('SignaKit failed to load config:', reason)
+  // Fall back to defaults — decide() returns null when not ready
+}
+```
+
+In a serverless environment (Lambda, Vercel Functions), call `onReady()` outside your handler so it runs on cold start:
+
+```ts
+// Runs once per Lambda cold start — resolved by the time a request arrives
+const readyPromise = client.onReady()
+
+export async function handler(event) {
+  await readyPromise
+  // ...
+}
+```
+
+---
+
+## Creating a user context
+
+A `UserContext` represents a specific user. Create one per request with the user's ID and any attributes you want to use in targeting rules.
+
+```ts
+const userContext = client.createUserContext('user-123', {
+  plan: 'pro',
+  country: 'US',
+  betaTester: true,
+})
+```
+
+### `createUserContext(userId, attributes?)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `userId` | `string` | Unique, stable identifier for the user. Used for deterministic bucketing — the same ID always produces the same variation. |
+| `attributes` | `Record<string, string \| number \| boolean>` | Key-value pairs matched against your audience targeting rules in the dashboard. |
+
+<Callout type="info">
+
+**`$userAgent` attribute** — pass the user's `User-Agent` string as `$userAgent` to enable bot detection. Bots receive the `off` variation and do not fire exposure events.
+
+```ts
+const userContext = client.createUserContext(userId, {
+  $userAgent: req.headers['user-agent'],
+  plan: 'pro',
+})
+```
+
+</Callout>
+
+---
+
+## Evaluating a single flag
+
+```ts
+const decision = userContext.decide('new-checkout')
+
+if (decision?.enabled) {
+  // Show the new checkout experience
+  console.log(decision.variationKey) // e.g. "treatment"
+}
+```
+
+### `decide(flagKey)`
+
+Returns a `Decision` object, or `null` if the flag does not exist, the client is not ready, or the user does not match any targeting rule.
+
+| Field | Type | Description |
+|---|---|---|
+| `flagKey` | `string` | The flag key you passed in |
+| `enabled` | `boolean` | Whether the flag is on for this user |
+| `variationKey` | `string` | Which variation the user is in (`"control"`, `"treatment"`, or your custom key) |
+| `ruleKey` | `string` | The targeting rule that matched |
+
+**Always null-check the return value.** A `null` result means the flag was not found or the user did not match any rule — treat it as the disabled/control state.
+
+```ts
+const decision = userContext.decide('my-flag')
+// decision may be null if the flag is off or the user is not targeted
+const showFeature = decision?.enabled ?? false
+```
+
+---
+
+## Evaluating all flags at once
+
+```ts
+const decisions = userContext.decideAll()
+
+if (decisions['new-checkout']?.enabled) {
+  // ...
+}
+if (decisions['redesigned-nav']?.enabled) {
+  // ...
+}
+```
+
+### `decideAll()`
+
+Returns a `Record<string, Decision>` — an object keyed by flag key. Only flags where the user matches a targeting rule are included.
+
+<Callout type="warning" title="Use decideAll() selectively">
+Calling `decideAll()` evaluates every flag in your project and fires an `$exposure` event for each one the user is bucketed into. In middleware that runs on every request, only evaluate the flags your route actually needs. Using `decideAll()` in middleware is one of the most common causes of unexpected event volume spikes.
+</Callout>
+
+---
+
+## Tracking events
+
+Track a conversion or goal event that you've defined in the SignaKit dashboard.
+
+```ts
+await userContext.trackEvent('purchase_completed', {
+  value: 99.99,
+  plan: 'pro',
+})
+```
+
+### `trackEvent(eventName, properties?)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventName` | `string` | The event name, matching an event definition in your project |
+| `properties` | `Record<string, string \| number \| boolean>` | Optional metadata sent with the event |
+
+**Returns:** `Promise<void>` — fire and forget. Errors are logged but do not throw.
+
+---
+
+## TypeScript types
+
+```ts
+import type {
+  SignaKitClient,
+  SignaKitUserContext,
+  SignaKitDecision,
+  SignaKitDecisions,
+} from '@signakit/flags-node'
+
+// Decision shape
+type SignaKitDecision = {
+  flagKey: string
+  enabled: boolean
+  variationKey: string
+  ruleKey: string
+}
+
+// decideAll() return type
+type SignaKitDecisions = Record<string, SignaKitDecision>
+```
+
+---
+
+## Targeted delivery
+
+When a flag is configured as a targeted rollout (not an experiment), `decide()` returns `enabled: true` for users who match the audience rule. No primary metric is needed.
+
+```ts
+const betaAccess = userContext.decide('beta-dashboard')
+
+if (betaAccess?.enabled) {
+  return redirect('/dashboard/beta')
+}
+```
+
+The user gets the same result on every call because bucketing is deterministic — the same `userId` always produces the same outcome for the same flag configuration.
+
+---
+
+## A/B testing
+
+When a flag is running as an experiment, `decide()` returns the assigned variation. The SDK automatically fires an `$exposure` event the first time a user is evaluated for that flag within the SDK instance's lifetime.
+
+```ts
+const checkout = userContext.decide('checkout-redesign')
+
+switch (checkout?.variationKey) {
+  case 'control':
+    return <LegacyCheckout />
+  case 'treatment-a':
+    return <CheckoutV2 />
+  case 'treatment-b':
+    return <CheckoutV3 />
+  default:
+    return <LegacyCheckout /> // null — flag off or user not targeted
+}
+```
+
+Track your primary metric when the user converts:
+
+```ts
+// After the user completes the purchase
+await userContext.trackEvent('purchase_completed', { value: order.total })
+```
+
+---
+
+## Exposure deduplication
+
+The Node.js SDK keeps an in-memory `Set` of already-exposed `userId:flagKey` pairs within the SDK instance's lifetime. `$exposure` events are only fired once per user per flag per instance — subsequent calls to `decide()` for the same user and flag are silent.
+
+In practice this means:
+- **Module-level singleton** (recommended): dedup lasts for the process lifetime
+- **Lambda / serverless**: dedup lasts for the cold-start lifetime, reset on each cold start
+- **Per-request client** (anti-pattern): dedup provides no protection — every request fires an exposure
+
+---
+
+## Error handling
+
+`onReady()` never throws. If the config fetch fails after all retries, it resolves with `{ success: false, reason: string }`. After that, `decide()` and `decideAll()` return `null` — your code should treat this as the default/off state.
+
+```ts
+const { success, reason } = await client.onReady()
+if (!success) {
+  logger.warn('SignaKit unavailable, using defaults', { reason })
+}
+
+// This is always safe — decide() returns null gracefully
+const decision = userContext.decide('my-flag')
+const enabled = decision?.enabled ?? false
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside a request handler | Re-fetches config on every request; dedup is per-instance so every request gets a fresh exposure | Create the client once at module level |
+| `decideAll()` in middleware | Evaluates every flag on every request; N flags × all traffic = high event volume | Use `decide('specific-flag')` in middleware |
+| Evaluating a flag inside a loop (per list item) | One exposure per item per render | Evaluate once per user, apply the result to all items |
+| Not awaiting `onReady()` before the first `decide()` | `decide()` may return `null` if config hasn't loaded yet | Await `onReady()` at cold start |
+
+---
+
+## Next.js App Router
+
+The most common integration pattern. Evaluate flags in a **server component** and pass results as props to client components.
+
+```ts title="app/checkout/page.tsx"
+import { client } from '@/lib/signakit'
+import { cookies } from 'next/headers'
+
+export default async function CheckoutPage() {
+  const cookieStore = await cookies()
+  const visitorId = cookieStore.get('visitor_id')?.value ?? 'anonymous'
+
+  const userCtx = client.createUserContext(visitorId, {
+    // pass any user attributes available server-side
+  })
+
+  const checkout = userCtx.decide('checkout-redesign')
+
+  return checkout?.variationKey === 'treatment'
+    ? <CheckoutV2 />
+    : <LegacyCheckout />
+}
+```
+
+See the **[Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)** for the full integration including middleware and conversion tracking.
+
+---
+
+## Related
+
+- [Quickstart →](/docs/flags/quickstart)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Express guide →](/docs/flags/guides/express)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

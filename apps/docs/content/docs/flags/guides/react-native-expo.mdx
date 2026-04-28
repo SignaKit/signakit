@@ -1,0 +1,340 @@
+---
+title: React Native / Expo
+description: Integrate SignaKit feature flags into a React Native or Expo app — stable user IDs with SecureStore, offline-tolerant config caching with AsyncStorage, and conversion tracking.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# React Native / Expo
+
+**SDK:** `@signakit/flags-react-native`
+**Environments:** React Native ≥ 0.74, Expo SDK 51+
+
+The `@signakit/flags-react-native` SDK fetches your flag config from the SignaKit CDN once on initialization, evaluates all flags **locally on-device**, and exposes decisions through a context provider and a `useFlag` hook. No browser APIs are used — events go over `fetch`, and optional config persistence uses `AsyncStorage` rather than `sessionStorage`.
+
+<Callout type="info">
+**Building a web React app?** Use `@signakit/flags-react` with `@signakit/flags-browser` instead. See the [React SDK →](/docs/flags/sdks/react)
+</Callout>
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+For Expo managed workflow:
+
+```bash
+npx expo install @signakit/flags-react-native
+```
+
+For bare React Native:
+
+```bash
+npm install @signakit/flags-react-native
+```
+
+</Step>
+
+<Step>
+
+### Install peer dependencies
+
+To cache the flag config across app restarts (`persistConfig`), install AsyncStorage:
+
+```bash
+npx expo install @react-native-async-storage/async-storage
+```
+
+For a stable anonymous user ID that survives reinstalls, install SecureStore and expo-crypto:
+
+```bash
+npx expo install expo-secure-store expo-crypto
+```
+
+<Callout type="info">
+**Bare React Native:** After installing the AsyncStorage package, run `npx pod-install` to link the native module before building.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Create a stable visitor ID
+
+SignaKit uses `userId` as the bucketing key — the same ID always produces the same variation. For authenticated users, use your auth session's user ID. For anonymous users, generate a UUID once and persist it in `SecureStore` so it survives app restarts (but not reinstalls).
+
+```ts title="lib/visitor.ts"
+import * as Crypto from 'expo-crypto'
+import * as SecureStore from 'expo-secure-store'
+
+const VISITOR_ID_KEY = 'signakit_visitor_id'
+
+export async function getVisitorId(): Promise<string> {
+  const existing = await SecureStore.getItemAsync(VISITOR_ID_KEY)
+  if (existing) return existing
+
+  const id = Crypto.randomUUID()
+  await SecureStore.setItemAsync(VISITOR_ID_KEY, id)
+  return id
+}
+```
+
+<Callout type="info">
+`SecureStore` is backed by Keychain (iOS) and Keystore (Android). The ID survives app updates but is cleared on uninstall, which is the right behavior for anonymous visitor bucketing.
+
+If you prefer the ID to survive reinstalls (e.g. for logged-in users), store the server-assigned user ID from your auth system instead of generating a local UUID.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Wrap your app with `SignaKitProvider`
+
+Load the visitor ID once before rendering and pass it to the provider. Use `loadingFallback` to show your existing splash screen while the SDK initializes — this ensures children always render with a resolved flag state.
+
+```tsx title="App.tsx"
+import { useEffect, useState } from 'react'
+import { SignaKitProvider } from '@signakit/flags-react-native'
+import { getVisitorId } from './lib/visitor'
+import { RootNavigator } from './navigation/RootNavigator'
+import { SplashScreen } from './components/SplashScreen'
+
+export default function App() {
+  const [userId, setUserId] = useState<string | null>(null)
+
+  useEffect(() => {
+    getVisitorId().then(setUserId)
+  }, [])
+
+  if (!userId) return <SplashScreen />
+
+  return (
+    <SignaKitProvider
+      sdkKey="sk_prod_yourOrgId_yourProjectId_random"
+      userId={userId}
+      persistConfig
+      loadingFallback={<SplashScreen />}
+    >
+      <RootNavigator />
+    </SignaKitProvider>
+  )
+}
+```
+
+`persistConfig` writes the last successfully fetched config to AsyncStorage. On the next cold start, the SDK loads the cached config immediately before the network request completes — so the app boots with real flag decisions even when offline.
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating a flag
+
+Use the `useFlag` hook anywhere inside the provider tree. It returns the resolved decision for the current user.
+
+```tsx title="screens/CheckoutScreen.tsx"
+import { useFlag } from '@signakit/flags-react-native'
+import { ActivityIndicator } from 'react-native'
+import { NewCheckout } from './NewCheckout'
+import { LegacyCheckout } from './LegacyCheckout'
+
+export function CheckoutScreen() {
+  const { enabled, loading } = useFlag('new-checkout')
+
+  if (loading) return <ActivityIndicator />
+
+  return enabled ? <NewCheckout /> : <LegacyCheckout />
+}
+```
+
+<Callout type="info">
+When `loadingFallback` is set on the provider, `loading` will always be `false` inside children — the provider holds rendering until the SDK is ready. You only need to handle `loading` explicitly if you omit `loadingFallback`.
+</Callout>
+
+---
+
+## A/B test variations
+
+Use `variationKey` when you need to render a different UI for each variant of an A/B test rather than a simple on/off branch.
+
+```tsx title="screens/OnboardingScreen.tsx"
+import { useFlag } from '@signakit/flags-react-native'
+
+export function OnboardingScreen() {
+  const { variationKey, loading } = useFlag('onboarding-redesign')
+
+  if (loading) return null
+
+  if (variationKey === 'short_flow') return <ShortOnboarding />
+  if (variationKey === 'video_intro') return <VideoOnboarding />
+  return <DefaultOnboarding />
+}
+```
+
+---
+
+## Flag variables
+
+Flags can carry typed variable payloads. Read them from the `variables` field.
+
+```tsx title="screens/HomeScreen.tsx"
+import { useFlag } from '@signakit/flags-react-native'
+
+export function HomeScreen() {
+  const { enabled, variables } = useFlag('home-feed-config')
+
+  const itemsPerPage = (variables['items_per_page'] as number) ?? 10
+  const showBanner = (variables['show_promo_banner'] as boolean) ?? false
+
+  return <FeedView itemsPerPage={itemsPerPage} showBanner={enabled && showBanner} />
+}
+```
+
+---
+
+## Passing attributes for targeting
+
+Pass user attributes to the provider to enable attribute-based targeting rules. Memoize the object so it only changes when the underlying values change — a new object reference on every render recreates the user context and re-evaluates all flags.
+
+```tsx title="App.tsx"
+import { useMemo } from 'react'
+import { SignaKitProvider } from '@signakit/flags-react-native'
+import { useAuth } from './hooks/useAuth'
+
+export function AppWithAuth({ userId }: { userId: string }) {
+  const { session } = useAuth()
+
+  const attributes = useMemo(
+    () => ({
+      plan: session?.user.plan ?? 'free',
+      country: session?.user.country ?? 'US',
+      appVersion: '3.2.1',
+    }),
+    [session?.user.plan, session?.user.country]
+  )
+
+  return (
+    <SignaKitProvider
+      sdkKey="sk_prod_yourOrgId_yourProjectId_random"
+      userId={userId}
+      attributes={attributes}
+      persistConfig
+      loadingFallback={<SplashScreen />}
+    >
+      <RootNavigator />
+    </SignaKitProvider>
+  )
+}
+```
+
+---
+
+## Navigation guard — deep linking and flag gating
+
+Evaluate a flag before navigating to a screen to gate a feature behind a flag at the navigation layer. Use `useUserContext` to access `decide()` directly when you need an imperative evaluation outside of a rendered component.
+
+```tsx title="navigation/RootNavigator.tsx"
+import { useCallback } from 'react'
+import { useUserContext } from '@signakit/flags-react-native'
+
+export function RootNavigator() {
+  const userContext = useUserContext()
+
+  const handleDeepLink = useCallback((url: string) => {
+    if (url.includes('/new-feature')) {
+      const decision = userContext?.decide('new-feature-screen')
+      if (!decision?.enabled) {
+        // Redirect to the existing screen instead
+        navigation.navigate('LegacyFeature')
+        return
+      }
+      navigation.navigate('NewFeature')
+    }
+  }, [userContext])
+
+  // wire handleDeepLink to your linking config ...
+}
+```
+
+<Callout type="warning" title="Check loading state before calling decide() imperatively">
+`useUserContext()` returns `null` while the SDK is initializing. Always guard with an optional chain (`userContext?.decide(...)`) or check for `null` before calling `decide()`.
+</Callout>
+
+---
+
+## Tracking conversion events
+
+Access `trackEvent` through the user context. This sends a conversion event to SignaKit with the current flag decisions attached automatically — no need to re-declare which flags were active.
+
+```tsx title="screens/CheckoutScreen.tsx"
+import { useUserContext } from '@signakit/flags-react-native'
+import { Button } from 'react-native'
+
+export function PurchaseButton({ amount }: { amount: number }) {
+  const userContext = useUserContext()
+
+  const handlePress = async () => {
+    await userContext?.trackEvent('purchase_completed', {
+      value: amount,
+      metadata: { currency: 'USD' },
+    })
+  }
+
+  return <Button onPress={handlePress} title="Complete purchase" />
+}
+```
+
+`trackEvent` is fire-and-forget — it never throws. Errors are logged to the console but do not propagate to the caller.
+
+---
+
+## `onReady` and cold-start behavior
+
+The SDK resolves its `onReady()` promise as soon as it has a usable config — either from the network or the AsyncStorage cache. You can inspect the result to distinguish between the two:
+
+```ts
+const result = await client.onReady()
+// result.success    — true if the SDK is ready to evaluate flags
+// result.fromCache  — true if config was loaded from AsyncStorage (network may still be pending)
+// result.reason     — error description when success is false
+```
+
+The full boot sequence when `persistConfig` is enabled:
+
+1. Load the last cached config from AsyncStorage immediately.
+2. Fetch fresh config from the SignaKit CDN.
+3. If the network request succeeds, use the fresh config and update the cache.
+4. If the network fails but a cached config was loaded, resolve as ready using the cache — the app boots offline-tolerant.
+5. If both fail, resolve with `success: false` and all `useFlag` calls return the off state (fail-open).
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Inline `attributes` object on `SignaKitProvider` | New object reference on every render recreates the user context and re-evaluates all flags | Memoize with `useMemo`, depending only on the values that actually matter for targeting |
+| Using `@signakit/flags-browser` in a React Native project | The browser SDK calls `sessionStorage`, `navigator`, and DOM APIs that do not exist in the Hermes/RN runtime | Use `@signakit/flags-react-native` instead |
+| Calling `userContext.decide()` inside a render function without `useFlag` | Bypasses the loading guard; can produce inconsistent results across re-renders | Use the `useFlag` hook |
+| Calling `userContext.decideAll()` on every screen mount | Fires a fresh `$exposure` batch on every navigation event | Call once after the SDK is ready and store the result in state or context |
+| Enabling `persistConfig` without installing the AsyncStorage peer | `tryLoadAsyncStorage()` returns `null` silently; the SDK falls back to no persistence without error | Install `@react-native-async-storage/async-storage` and link it before enabling `persistConfig` |
+| Using the visitor ID only from `AsyncStorage` without `SecureStore` | AsyncStorage is unencrypted and readable by other processes on rooted devices | Use `expo-secure-store` for the visitor ID; fall back to AsyncStorage only if SecureStore is unavailable |
+| Generating a new UUID on every app open | Every open produces a new user ID, so A/B assignments are randomized on each session | Persist the UUID after first generation and return the stored value on subsequent opens |
+
+---
+
+## Related
+
+- [React Native SDK reference →](/docs/flags/sdks/react-native)
+- [React SDK →](/docs/flags/sdks/react)
+- [Flutter guide →](/docs/flags/guides/flutter-mobile)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Quickstart →](/docs/flags/quickstart)

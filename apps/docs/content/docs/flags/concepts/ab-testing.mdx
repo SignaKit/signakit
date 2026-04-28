@@ -1,0 +1,261 @@
+---
+title: A/B Testing
+description: Run controlled experiments with fixed traffic splits, measure conversion lift, and ship winners with statistical confidence.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+
+# A/B Testing
+
+An A/B test is a controlled experiment that exposes different users to different experiences and measures which one performs better. In SignaKit, every A/B test is a flag with multiple variations and a fixed traffic split. You define the split, call `decide()`, and SignaKit handles bucketing, exposure tracking, and results.
+
+---
+
+## What makes up an A/B test
+
+A test has three parts:
+
+- **Variations** — named experiences the user can receive. A standard A/B test has `control` (the existing behavior) and `treatment` (the new behavior). A multivariate test adds more: `control`, `v1`, `v2`, and so on.
+- **Traffic split** — the percentage of users routed to each variation. Percentages must total 100. A classic 50/50 split sends half your users to each side. A 33/33/34 split covers three variations.
+- **Metrics** — the conversion events you measure to determine a winner.
+
+You configure the flag and traffic split in the dashboard. The SDK handles the rest.
+
+---
+
+## Running an experiment in code
+
+<Steps>
+
+<Step>
+
+### Call `decide()` and branch on `variationKey`
+
+`decide()` returns a decision object. For an A/B test, check `decision.variationKey` to determine which experience to render. The flag must be enabled for a decision to be returned — guard against `null`.
+
+<Tabs items={['Node.js', 'React', 'Python', 'Go']}>
+
+<Tab>
+```typescript title="server.ts"
+const userCtx = client.createUserContext(userId, attributes)
+const decision = userCtx.decide('checkout-redesign')
+
+if (!decision) {
+  // flag is off or user is not in the experiment
+  renderDefault()
+  return
+}
+
+if (decision.variationKey === 'treatment') {
+  renderNewCheckout()
+} else {
+  // control — existing experience
+  renderCurrentCheckout()
+}
+```
+</Tab>
+
+<Tab>
+```tsx title="CheckoutPage.tsx"
+import { useFlag } from '@signakit/flags-react'
+
+function CheckoutPage() {
+  const decision = useFlag('checkout-redesign')
+
+  if (decision?.variationKey === 'treatment') {
+    return <NewCheckout />
+  }
+
+  return <CurrentCheckout />
+}
+```
+</Tab>
+
+<Tab>
+```python title="checkout.py"
+user = client.create_user_context(user_id, attributes)
+decision = user.decide("checkout-redesign")
+
+if decision is None:
+    render_default()
+elif decision.variation_key == "treatment":
+    render_new_checkout()
+else:
+    render_current_checkout()
+```
+</Tab>
+
+<Tab>
+```go title="checkout.go"
+userCtx := client.CreateUserContext(userID, attributes)
+decision := userCtx.Decide("checkout-redesign")
+
+if decision == nil {
+    renderDefault(w, r)
+    return
+}
+
+if decision.VariationKey == "treatment" {
+    renderNewCheckout(w, r)
+} else {
+    renderCurrentCheckout(w, r)
+}
+```
+</Tab>
+
+</Tabs>
+
+</Step>
+
+<Step>
+
+### Track conversions with `trackEvent()`
+
+Exposure is recorded automatically when `decide()` is called — no extra call needed. To measure conversion, call `trackEvent()` when the user completes the action you care about.
+
+```typescript title="server.ts"
+// After a purchase completes:
+userCtx.trackEvent('purchase_completed', 49.99)
+
+// After a button click (no value needed):
+userCtx.trackEvent('signup_clicked')
+```
+
+Pass an optional numeric `value` when you want to measure revenue or quantity (sum, average) in addition to conversion rate. Omit it for binary conversion tracking.
+
+<Callout type="info">
+  `trackEvent()` is fire-and-forget. You do not need to await it or handle its return value in your request path.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Multivariate: branch on more than two variations
+
+For tests with three or more variations, switch on all keys:
+
+```typescript title="server.ts"
+const decision = userCtx.decide('pricing-page')
+
+switch (decision?.variationKey) {
+  case 'v1':
+    return renderSimplifiedPricing()
+  case 'v2':
+    return renderValuePropsFirst()
+  default:
+    // control or no decision
+    return renderCurrentPricing()
+}
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## How bucketing works
+
+SignaKit uses deterministic bucketing. When `decide()` is called for a given `userId` and `flagKey`, it hashes the two together to produce a stable bucket number. That number maps to a variation based on the traffic split.
+
+The result: **the same user always receives the same variation for the life of the experiment**, regardless of which server handles the request, which SDK version is running, or how many times `decide()` is called. This prevents flicker and ensures a user's experience is consistent across sessions.
+
+<Callout type="warning">
+  Do not change the traffic split of a running experiment. Shifting percentages mid-test re-buckets some users into a different variation, contaminating your results. If you need to pause a test, disable the flag entirely.
+</Callout>
+
+Bucketing happens locally in the SDK using the flag configuration fetched from SignaKit's CDN. There is no network call on `decide()`.
+
+---
+
+## Reading results in the dashboard
+
+Navigate to your flag and open the **Results** tab. For each variation you will see:
+
+| Metric | What it means |
+|--------|---------------|
+| **Exposures** | Unique users who received this variation |
+| **Conversions** | Users who fired the tracked event after exposure |
+| **Conversion rate** | Conversions ÷ exposures |
+| **Lift** | Relative improvement over control (e.g. +12.4%) |
+| **p-value** | Probability the observed lift is due to chance |
+| **Confidence interval** | Range within which the true lift likely falls |
+
+SignaKit uses a two-proportion z-test. When the p-value drops below 0.05 (95% confidence) and remains there, the dashboard surfaces a plain-English verdict: **"treatment is the winner"** or **"no significant difference detected."**
+
+### When to trust results
+
+Do not read results early and stop on the first promising p-value. A p-value below 0.05 at day two can easily reverse by day seven — this is called peeking bias. Guidelines:
+
+- **Run the test long enough to collect your minimum sample size.** Use a sample size calculator before launching; inputs are your baseline conversion rate, minimum detectable effect (MDE), and desired confidence level.
+- **Run for at least one full week** to capture day-of-week variation in user behavior.
+- **Decide the stopping criteria before the test starts** — not after you see the numbers.
+
+<Callout type="info">
+  A good rule of thumb: if you cannot afford to collect at least 1,000 exposures per variation, the results will be too noisy to act on. Consider using a [multi-armed bandit](/docs/flags/concepts/multi-armed-bandit) instead, which adapts traffic allocation in real time without requiring a fixed sample size.
+</Callout>
+
+---
+
+## Ending a test
+
+Once a winner is confirmed:
+
+<Steps>
+
+<Step>
+
+### Ship the winner
+
+In the dashboard, set the winning variation's traffic allocation to 100% (and all others to 0%). Every user now receives the winner. Do this before cleaning up code so there is no gap in coverage.
+
+</Step>
+
+<Step>
+
+### Remove the flag from code
+
+Replace every `decide('your-flag-key')` branch with the winning code path. Delete the losing variation's code.
+
+```typescript
+// Before — flag in place
+const decision = userCtx.decide('checkout-redesign')
+if (decision?.variationKey === 'treatment') {
+  renderNewCheckout()
+} else {
+  renderCurrentCheckout()
+}
+
+// After — winner shipped, flag removed
+renderNewCheckout()
+```
+
+</Step>
+
+<Step>
+
+### Archive the flag
+
+Archive the flag in the dashboard to keep your flag list clean. Archived flags remain visible in historical reports but cannot be evaluated.
+
+</Step>
+
+</Steps>
+
+---
+
+## A/B testing vs. multi-armed bandit
+
+A/B tests use a **fixed** traffic split for the duration of the experiment. This is appropriate when you want statistically rigorous results with a controlled sample. If you prefer to automatically shift traffic toward the better-performing variation as the experiment runs, use a [multi-armed bandit](/docs/flags/concepts/multi-armed-bandit) instead.
+
+---
+
+## Related
+
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how flag evaluation and exposure tracking work
+- [Events & Metrics](/docs/flags/concepts/events-and-metrics) — full reference for `trackEvent()` and metric configuration
+- [Multi-Armed Bandit](/docs/flags/concepts/multi-armed-bandit) — adaptive traffic allocation without a fixed sample size
+- [Targeted Delivery](/docs/flags/concepts/targeted-delivery) — restrict an experiment to a specific audience segment

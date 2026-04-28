@@ -1,0 +1,169 @@
+---
+title: Multi-Armed Bandit
+description: Automatically shift traffic toward winning variations using adaptive allocation — minimize regret while your experiment is still running.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+
+# Multi-Armed Bandit
+
+A multi-armed bandit (MAB) is an adaptive experiment. Instead of splitting traffic equally for the entire test duration, a MAB continuously updates each variation's traffic share based on real conversion data. Variations that perform better get more traffic. Variations that underperform get less.
+
+The goal is to **minimize regret** — the cumulative cost of showing users a worse experience while you're still figuring out which variant is best.
+
+---
+
+## How it differs from A/B testing
+
+A standard A/B test holds a fixed traffic split (typically 50/50) for the entire experiment. You collect data, wait for statistical significance, then pick the winner. During that time, half your users see the losing variant regardless of how early the data starts pointing to a winner.
+
+A MAB starts at equal allocation and adjusts as data accumulates.
+
+| | A/B Test | Multi-Armed Bandit |
+|---|---|---|
+| Initial split | Fixed (e.g. 50/50) | Equal across variants |
+| Allocation over time | Unchanged | Shifts toward better variants |
+| Goal | Maximum statistical certainty | Minimum regret during experiment |
+| Converges faster? | No | Yes |
+| Causal inference | Strong | Weaker |
+| Best metric cycle | Any | Short (clicks, add-to-cart) |
+
+Neither is strictly better. The right choice depends on what you need from the experiment.
+
+---
+
+## How SignaKit implements it
+
+SignaKit runs a scheduled Lambda function — the experiment results processor — that periodically reads exposure and conversion data, computes new traffic weights for each variation, and writes those weights back to the flag configuration.
+
+The update cycle looks like this:
+
+1. Users are bucketed into variations and exposed via `decide()`. Exposure events are recorded.
+2. Conversion events arrive via `trackEvent()` and are stored.
+3. On each scheduled run, the results Lambda reads the accumulated data and computes new allocation percentages based on each variation's conversion rate.
+4. The updated flag config is published to the SignaKit CDN.
+5. SDKs pick up the new weights on their next config refresh.
+
+From the flag's perspective, the allocation percentages stored in the config are just numbers that happen to change over time. The SDK doesn't need to know it's a MAB — it reads the current weights and evaluates accordingly.
+
+<Callout type="info" title="Config refresh cadence">
+SDKs refresh the flag config on a polling interval (default: 30 seconds for server-side SDKs). There is a small lag between when the results Lambda publishes new weights and when all SDK instances pick them up. This is normal and expected.
+</Callout>
+
+---
+
+## SDK usage
+
+From a developer's perspective, a MAB flag is identical to any other experiment flag. You call `decide()` to get a variation and `trackEvent()` to record a conversion. The adaptive allocation happens in the backend — your code doesn't change.
+
+<Tabs items={['Node.js', 'React', 'Python', 'Go']}>
+
+<Tab>
+```ts title="app/checkout/route.ts"
+import { client } from '@/lib/signakit'
+
+const userCtx = client.createUserContext(userId)
+
+// Returns a variationKey — e.g. 'control' or 'compact-form'
+const { variationKey } = userCtx.decide('checkout-flow-mab')
+
+// Later, when the user converts:
+userCtx.trackEvent('checkout_completed')
+```
+</Tab>
+
+<Tab>
+```tsx title="components/CheckoutButton.tsx"
+import { useFlag, useTrackEvent } from '@signakit/flags-react'
+
+function CheckoutButton() {
+  const { variationKey } = useFlag('checkout-flow-mab')
+  const track = useTrackEvent()
+
+  function handleClick() {
+    track('checkout_completed')
+    // proceed with checkout
+  }
+
+  return (
+    <button onClick={handleClick}>
+      {variationKey === 'compact-form' ? 'Quick Checkout' : 'Checkout'}
+    </button>
+  )
+}
+```
+</Tab>
+
+<Tab>
+```python title="checkout.py"
+user = client.create_user_context(user_id)
+
+# Returns a variationKey — e.g. 'control' or 'compact-form'
+decision = user.decide("checkout-flow-mab")
+variation = decision.variation_key if decision else "control"
+
+# Later, on conversion:
+user.track_event("checkout_completed")
+```
+</Tab>
+
+<Tab>
+```go title="checkout.go"
+userCtx := client.CreateUserContext(userID, nil)
+
+// Returns a variationKey — e.g. "control" or "compact-form"
+decision, _ := userCtx.Decide("checkout-flow-mab")
+
+// Later, on conversion:
+userCtx.TrackEvent("checkout_completed", nil)
+```
+</Tab>
+
+</Tabs>
+
+<Callout type="info" title="MAB is a dashboard setting">
+You don't configure bandit behavior in code. Create the flag in the SignaKit dashboard, enable the MAB option, and set the metric you want to optimize. The SDK call is identical to a standard A/B test.
+</Callout>
+
+---
+
+## When to use MAB vs A/B testing
+
+**Use a multi-armed bandit when:**
+
+- You want to maximize conversions *during* the experiment, not just after it concludes
+- Your success metric has a short decision cycle — clicks, add-to-cart, sign-ups, button conversions
+- You have enough traffic that the bandit can gather signal quickly (thousands of daily events per variation)
+- You have a clear primary metric and don't need to analyze secondary effects deeply
+- You're running a UI or copy experiment where the best variant is likely obvious from the data
+
+**Use a standard A/B test when:**
+
+- You need strong causal inference — you want to know *why* a variant won, not just *that* it won
+- Your primary metric has a long conversion window (7-day activation, 30-day retention, LTV)
+- You're testing a change with potential downstream effects that take time to surface
+- You need a clean hold-out for post-hoc analysis or regulatory/compliance documentation
+- Sample sizes are small — the bandit needs volume to adapt meaningfully
+
+---
+
+## Limitations
+
+**Weaker statistical guarantees.** Because traffic allocation shifts dynamically, the statistical analysis of a MAB result is more complex than a fixed A/B test. Confidence intervals are harder to compute cleanly. If rigorous p-values or Bayesian credible intervals are a requirement, a fixed experiment gives you cleaner numbers.
+
+**Novelty effects can mislead early.** A new variant often gets higher engagement purely because it's new. If the bandit converges quickly on that early signal, it may over-allocate to a variant that doesn't hold its advantage once the novelty fades. This is especially relevant for UI changes.
+
+**Long-cycle metrics don't work well.** If your conversion event fires 30 days after exposure, the bandit has almost no signal to act on during the experiment window. The allocation will barely move from its starting point.
+
+**Less visibility into losers.** As the bandit reduces traffic to underperforming variants, you accumulate less data on them. If you later want to understand how much worse the losing variant was, the data is thin.
+
+**Not suitable for mutually exclusive experiments.** If you're running multiple experiments on the same surface and need clean user assignment without overlap, a fixed A/B test with explicit exclusion logic is easier to reason about.
+
+---
+
+## Related
+
+- [A/B Testing](/docs/flags/concepts/ab-testing) — fixed-split experiments with statistical significance reporting
+- [Events & Metrics](/docs/flags/concepts/events-and-metrics) — how conversion events are tracked and linked to experiments
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — how config fetching, local evaluation, and event delivery work end-to-end

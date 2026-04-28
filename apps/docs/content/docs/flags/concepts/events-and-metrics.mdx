@@ -1,0 +1,182 @@
+---
+title: Events & Metrics
+description: How SignaKit tracks exposures and conversions — and how those events become the statistical results you see in the dashboard.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Events & Metrics
+
+SignaKit uses two types of events to measure experiments: **exposure events** and **custom conversion events**. Exposures are fired automatically. Conversions are fired by your code. Together they produce the conversion rates, lift, and p-values shown in the dashboard.
+
+---
+
+## Exposure events
+
+Every time `decide()` is called for a user who is bucketed into a flag, the SDK fires a `$exposure` event automatically. You do not write any code for this.
+
+The `$exposure` event records:
+
+- Which user was evaluated (`userId`)
+- Which flag was evaluated (`flagKey`)
+- Which variation they received (`variationKey`)
+- The timestamp of first exposure
+
+The SDK deduplicates exposures within a single SDK instance lifetime. If you call `decide()` for the same user and flag ten times, only one `$exposure` event is sent.
+
+In the dashboard, `$exposure` events populate the **Unique Exposures** count for each variation. This is the denominator in every conversion rate calculation.
+
+```ts title="Exposure fires automatically — no extra code needed"
+const userCtx = client.createUserContext('user-123', { plan: 'pro' })
+
+// $exposure is sent the first time this user is evaluated for this flag
+const decision = userCtx.decide('checkout-redesign')
+```
+
+<Callout type="info">
+  Bots are excluded from exposure tracking. Pass `$userAgent` as an attribute when creating the user context and the SDK will suppress both `decide()` bucketing and `$exposure` events for known bot user agents.
+</Callout>
+
+---
+
+## Custom conversion events
+
+Conversion events are what you track — they represent the goals you care about. Call `trackEvent()` on the user context after a meaningful action occurs.
+
+```ts
+userCtx.trackEvent('signup_clicked')
+```
+
+Pass a numeric `value` in the properties object when you want to track a revenue or ratio metric:
+
+```ts
+userCtx.trackEvent('purchase_completed', { value: 49.99 })
+userCtx.trackEvent('video_watched', { value: 0.85 }) // 85% completion
+```
+
+### `trackEvent(eventName, properties?)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventName` | `string` | The event name. Must match an event you've defined in the dashboard. |
+| `properties` | `Record<string, string \| number \| boolean>` | Optional metadata. Use `value` for the numeric metric SignaKit aggregates into mean value. |
+
+Custom events are the numerator in your conversion rate. If 40 out of 200 users in the `treatment` group fire `purchase_completed`, SignaKit reports a 20% conversion rate for that variation.
+
+---
+
+## A complete A/B test flow
+
+This example shows the full lifecycle: initialization, evaluation, rendering a variation, and tracking the conversion.
+
+```ts title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+export { client }
+```
+
+```ts title="app/checkout/route.ts"
+import { client } from '@/lib/signakit'
+
+export async function GET(req: Request) {
+  await client.onReady()
+
+  const userId = getUserId(req) // your auth layer
+  const userCtx = client.createUserContext(userId, {
+    plan: 'pro',
+    country: 'US',
+  })
+
+  // $exposure fires here, automatically
+  const decision = userCtx.decide('checkout-redesign')
+  const variation = decision?.variationKey ?? 'control'
+
+  return Response.json({ variation })
+}
+
+export async function POST(req: Request) {
+  const { userId, orderTotal } = await req.json()
+
+  const userCtx = client.createUserContext(userId)
+
+  // Conversion event — attributed to this user's active variation
+  await userCtx.trackEvent('purchase_completed', { value: orderTotal })
+
+  return Response.json({ ok: true })
+}
+```
+
+---
+
+## How attribution works
+
+When a conversion event fires, SignaKit attributes it to whatever variation the user was last bucketed into for each active experiment. If `user-123` was assigned to `treatment` during the `decide()` call, and later fires `purchase_completed`, that purchase is counted against `treatment`'s conversion total.
+
+Attribution is user-scoped and server-side. The event ingestion pipeline validates the SDK key, passes the event through SQS, and the event consumer writes it to PostgreSQL alongside a reference to the user's active variation assignments. No client-side state is involved.
+
+---
+
+## Events are non-blocking
+
+Both `$exposure` and `trackEvent` calls are added to an in-memory queue and flushed asynchronously in batches. Neither call waits for a network response before returning. Your request path is not affected.
+
+The queue is flushed:
+- On a fixed timer interval
+- When the batch reaches its size limit
+- On process shutdown (best-effort flush)
+
+<Callout type="warning">
+  In short-lived serverless environments (Lambda, Vercel Functions), the process may exit before the flush timer fires. Call `await client.flush()` at the end of your handler if you need guaranteed delivery of events from that invocation.
+</Callout>
+
+---
+
+## Use a consistent userId
+
+<Callout type="danger" title="Attribution requires the same userId in both calls">
+  The `userId` passed to `createUserContext()` when calling `decide()` must be the same `userId` used when calling `trackEvent()`. If they differ, the conversion event cannot be attributed to a variation and the experiment results will be incorrect.
+
+  ```ts
+  // ✅ Correct — same userId in both contexts
+  const userCtx = client.createUserContext('user-123')
+  userCtx.decide('checkout-redesign')
+  // ... later, on conversion ...
+  const sameCtx = client.createUserContext('user-123')
+  sameCtx.trackEvent('purchase_completed', { value: 49.99 })
+
+  // ❌ Wrong — mismatched userId breaks attribution
+  const userCtx = client.createUserContext('user-123')
+  userCtx.decide('checkout-redesign')
+  const anonCtx = client.createUserContext('anon-session-xyz')
+  anonCtx.trackEvent('purchase_completed', { value: 49.99 })
+  ```
+</Callout>
+
+Use a stable, authenticated user ID wherever possible. If you evaluate flags before a user logs in, alias the anonymous ID to the authenticated ID at login time to avoid attribution gaps.
+
+---
+
+## Dashboard metrics
+
+The dashboard reports the following for each variation in an experiment:
+
+| Metric | Description |
+|---|---|
+| **Unique Exposures** | Count of distinct users who received this variation (`$exposure` events) |
+| **Conversions** | Count of distinct users who fired the primary metric event |
+| **Conversion Rate** | Conversions ÷ Unique Exposures |
+| **Mean Value** | Average of the `value` property across all conversion events (for numeric metrics) |
+| **Lift** | Percentage change in conversion rate relative to the control variation |
+| **p-value** | Statistical significance of the observed lift |
+
+SignaKit uses a two-tailed z-test for conversion rate comparisons and a Welch's t-test for mean value comparisons. Results are shown per-variation so you can compare multiple treatment arms against control simultaneously.
+
+---
+
+## Related
+
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Feature Flags →](/docs/flags/concepts/feature-flags)
+- [Node.js SDK →](/docs/flags/sdks/node)
+- [Quickstart →](/docs/flags/quickstart)

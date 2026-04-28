@@ -1,0 +1,329 @@
+---
+title: React Native
+description: Full API reference for @signakit/flags-react-native — SignaKitProvider, useFlag hook, and AsyncStorage config persistence for feature flags in React Native and Expo apps.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# React Native SDK
+
+**Package:** `@signakit/flags-react-native`
+**Registry:** npm
+**Environments:** React Native ≥ 0.74, Expo SDK 51+
+
+A self-contained SDK for React Native and Expo apps. Fetches your flag config from the SignaKit CDN once on initialization, evaluates all flags **locally** on-device, and surfaces decisions through a context provider and a `useFlag` hook. No browser APIs are used — events go over `fetch`, and optional config persistence uses `AsyncStorage` rather than `sessionStorage`.
+
+<Callout type="info">
+**Building a web React app?** Use `@signakit/flags-react` instead — it targets the browser and pairs with `@signakit/flags-browser`. See the [React SDK →](/docs/flags/sdks/react)
+</Callout>
+
+---
+
+## Installation
+
+```npm
+npm install @signakit/flags-react-native
+```
+
+If you want offline-tolerant cold starts, also install the optional AsyncStorage peer:
+
+```npm
+npm install @react-native-async-storage/async-storage
+```
+
+For Expo managed workflow, link the native module:
+
+```npm
+npx expo install @react-native-async-storage/async-storage
+```
+
+---
+
+## `SignaKitProvider`
+
+Wrap your app root with `SignaKitProvider`. It creates the SDK client, fetches the flag config, and makes all decisions available to any `useFlag` call in the tree.
+
+```tsx title="App.tsx"
+import { SignaKitProvider } from '@signakit/flags-react-native'
+import { RootNavigator } from './navigation/RootNavigator'
+
+export default function App() {
+  return (
+    <SignaKitProvider
+      sdkKey="sk_prod_yourOrgId_yourProjectId_random"
+      userId="user-123"
+      attributes={{ plan: 'pro', country: 'US' }}
+      persistConfig
+      loadingFallback={<SplashScreen />}
+    >
+      <RootNavigator />
+    </SignaKitProvider>
+  )
+}
+```
+
+### Props
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `sdkKey` | `string` | ✓ | Your SignaKit browser SDK key |
+| `userId` | `string` | ✓ | Stable unique identifier for the current user. Changes trigger re-evaluation of all flags. |
+| `attributes` | `UserAttributes` | — | User attributes matched against targeting rules. Supports `string`, `number`, `boolean`, and `string[]` values. |
+| `persistConfig` | `boolean` | — | When `true`, the last successfully fetched config is written to AsyncStorage so the app can boot offline. Requires `@react-native-async-storage/async-storage`. Defaults to `false`. |
+| `loadingFallback` | `ReactNode` | — | Rendered while the client is initializing. Defaults to `null` (children render with `loading: true` from `useFlag`). |
+
+<Callout type="warning" title="Memoize attributes to avoid unnecessary re-evaluation">
+```tsx
+// ❌ New object on every render → recreates user context and re-evaluates all flags
+<SignaKitProvider attributes={{ plan: user.plan }}>
+
+// ✓ Stable reference
+const attributes = useMemo(() => ({ plan: user.plan }), [user.plan])
+<SignaKitProvider attributes={attributes}>
+```
+</Callout>
+
+### Initialization behavior
+
+The Provider runs this sequence on mount:
+
+1. If `persistConfig` is enabled, loads the last cached config from AsyncStorage immediately.
+2. Fetches fresh config from the SignaKit CDN.
+3. If the network request succeeds, the fresh config is used and written back to AsyncStorage (when `persistConfig` is enabled).
+4. If the network request fails but a cached config was loaded in step 1, the Provider resolves as ready using the cached config — the app boots offline-tolerant.
+5. If both fail, the Provider resolves with `loading: false` and all `useFlag` calls return the off state (fail-open).
+
+---
+
+## `useFlag(flagKey)`
+
+Evaluates a single flag for the current user.
+
+```tsx
+import { useFlag } from '@signakit/flags-react-native'
+
+function CheckoutButton() {
+  const { enabled, variationKey, loading } = useFlag('new-checkout')
+
+  if (loading) return <ActivityIndicator />
+
+  return enabled ? <NewCheckoutButton /> : <LegacyCheckoutButton />
+}
+```
+
+### Return value
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | `boolean` | Whether the flag is on for this user. `false` while loading. |
+| `variationKey` | `string` | Assigned variation key (e.g. `'on'`, `'off'`, `'treatment'`). `'off'` while loading or when the flag is disabled. |
+| `ruleKey` | `string \| null` | The rule key that matched this user. `null` for the default allocation or while loading. |
+| `ruleType` | `'ab-test' \| 'multi-armed-bandit' \| 'targeted' \| null` | The rule type that produced this decision. `null` for the default allocation, disabled flags, or while loading. |
+| `variables` | `Record<string, VariableValue>` | Resolved variable values for the matched variation. Empty object while loading or when no variables are defined. |
+| `loading` | `boolean` | `true` until the Provider finishes initializing. Always `false` when `loadingFallback` is set on the Provider. |
+
+### Variation-specific rendering
+
+Use `variationKey` when you need to render different UI for each variant of an A/B test:
+
+```tsx
+function HeroSection() {
+  const { variationKey, loading } = useFlag('hero-redesign')
+
+  if (loading) return <Skeleton />
+
+  if (variationKey === 'treatment_a') return <HeroVariantA />
+  if (variationKey === 'treatment_b') return <HeroVariantB />
+  return <HeroControl />
+}
+```
+
+### Flag variables
+
+Flags can carry typed variable payloads — use `variables` to read them:
+
+```tsx
+function OnboardingFlow() {
+  const { enabled, variables } = useFlag('onboarding-steps')
+
+  if (!enabled) return <DefaultOnboarding />
+
+  const maxSteps = variables['max_steps'] as number ?? 3
+  return <OnboardingWizard steps={maxSteps} />
+}
+```
+
+---
+
+## `useFlagAll()`
+
+<Callout type="warning">
+`useFlagAll()` does not exist in this SDK. To evaluate multiple flags, call `useFlag()` individually for each key. This keeps exposure tracking precise and avoids firing `$exposure` events for flags the user never actually encountered.
+</Callout>
+
+If you need to evaluate all flags at once outside of React (e.g., in a navigation guard or background task), use the client directly:
+
+```tsx
+import { useUserContext } from '@signakit/flags-react-native'
+
+function useAllDecisions() {
+  const userContext = useUserContext()
+  if (!userContext) return {}
+  return userContext.decideAll()
+}
+```
+
+`decideAll()` fires an `$exposure` event for every flag the user is bucketed into. Call it once, not on every render.
+
+---
+
+## `useTrackEvent()`
+
+<Callout type="info">
+There is no `useTrackEvent` hook in this SDK. Access `trackEvent` through the user context directly.
+</Callout>
+
+```tsx
+import { useUserContext } from '@signakit/flags-react-native'
+
+function PurchaseButton({ amount }: { amount: number }) {
+  const userContext = useUserContext()
+
+  const handlePress = async () => {
+    await userContext?.trackEvent('purchase_completed', {
+      value: amount,
+      metadata: { plan: 'pro' },
+    })
+  }
+
+  return <Button onPress={handlePress} title="Buy now" />
+}
+```
+
+`trackEvent` accepts an event key and an optional options object:
+
+| Option | Type | Description |
+|---|---|---|
+| `value` | `number` | Numeric value for revenue or goal metrics |
+| `metadata` | `Record<string, unknown>` | Arbitrary metadata attached to the event. Dropped silently if serialized size exceeds 5 000 bytes. |
+
+Fire and forget — `trackEvent` never throws. Errors are logged to the console.
+
+---
+
+## `useUserContext()`
+
+Returns the active `SignaKitUserContext` instance, or `null` while the Provider is initializing. Use this when you need direct access to `decide()`, `decideAll()`, or `trackEvent()` outside of the `useFlag` hook.
+
+```tsx
+import { useUserContext } from '@signakit/flags-react-native'
+
+function FeatureGate({ flagKey, children }: { flagKey: string; children: ReactNode }) {
+  const userContext = useUserContext()
+  if (!userContext) return null
+
+  const decision = userContext.decide(flagKey)
+  return decision?.enabled ? <>{children}</> : null
+}
+```
+
+---
+
+## AsyncStorage persistence
+
+When `persistConfig` is enabled on the Provider, the SDK writes the latest successful config to AsyncStorage under the key prefix `@signakit/config:`. On the next cold start, this cached config is loaded immediately before the network request completes — so the app renders with real flag decisions rather than the off/loading state.
+
+```
+AsyncStorage keys written by the SDK:
+  @signakit/config:{sdkKey}   — the serialized flag config JSON
+  @signakit/etag:{sdkKey}     — the ETag of the last fetch for conditional requests
+```
+
+The `onReady()` result includes a `fromCache` boolean indicating whether the ready state was satisfied by the AsyncStorage cache rather than a fresh network response:
+
+```tsx
+const { success, fromCache, reason } = await client.onReady()
+// success: true, fromCache: true  → served from cache; network request may still be pending
+// success: true, fromCache: false → fresh config fetched successfully
+// success: false                  → no network and no cache available
+```
+
+<Callout type="info">
+**Expo Go** supports `AsyncStorage` out of the box. For bare React Native, run `npx pod-install` after installing the peer package to link the native module.
+</Callout>
+
+---
+
+## Exposure deduplication
+
+Unlike the browser SDK, there is no `sessionStorage` available in React Native. The SDK uses an **in-memory `Map`** keyed by `${flagKey}:${userId}` to deduplicate `$exposure` events. The map lives for the lifetime of the `SignaKitClient` instance — it resets on app cold start, which mirrors the natural session boundary of a mobile app.
+
+`$exposure` events are only fired for `ab-test` and `multi-armed-bandit` rules. Flags using `targeted` rules (simple rollouts) never fire an exposure event, since there is no experiment to attribute.
+
+---
+
+## TypeScript types
+
+```typescript
+import type {
+  SignaKitClientConfig,
+  OnReadyResult,
+  UserAttributes,
+  SignaKitDecision,
+  SignaKitDecisions,
+  SignaKitEvent,
+  TrackEventOptions,
+  VariableValue,
+  FlagVariable,
+  RuleType,
+  Environment,
+  AsyncStorageLike,
+} from '@signakit/flags-react-native'
+```
+
+The `AsyncStorageLike` interface describes the minimal contract the SDK requires for persistence. Pass a custom implementation if you prefer a different storage backend:
+
+```typescript
+export interface AsyncStorageLike {
+  getItem(key: string): Promise<string | null>
+  setItem(key: string, value: string): Promise<void>
+  removeItem(key: string): Promise<void>
+}
+```
+
+---
+
+## Differences from the web React SDK
+
+| Concern | `@signakit/flags-react` (web) | `@signakit/flags-react-native` |
+|---|---|---|
+| Session persistence | `sessionStorage` (browser) | In-memory `Map` (resets on cold start) |
+| Config persistence | Not supported | AsyncStorage via `persistConfig: true` |
+| Event transport | `navigator.sendBeacon` → `fetch` fallback | `fetch` only (Hermes/RN runtime) |
+| Bot detection | Auto-detected via `$userAgent` | Not applicable — pass `$userAgent` explicitly if needed |
+| `FlagGate` component | Included | Not included — use `useFlag` or `useUserContext` |
+| `useFlagAll` hook | Included | Not included — call `userContext.decideAll()` directly |
+| `useTrackEvent` hook | Included | Not included — call `userContext.trackEvent()` directly |
+| Peer dependency | `@signakit/flags-browser` | None (self-contained) |
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Inline `attributes` object on the Provider | New object reference on every render recreates the user context and re-evaluates all flags | Memoize with `useMemo` |
+| Using `@signakit/flags-browser` in a React Native project | The browser SDK calls `sessionStorage`, `navigator`, and DOM APIs that do not exist in the React Native runtime | Use `@signakit/flags-react-native` instead |
+| Calling `userContext.decide()` directly inside a render function without memoization | Evaluation runs on every render; bypasses the loading guard in `useFlag` | Use the `useFlag` hook |
+| Calling `userContext.decideAll()` on every screen mount | Fires a fresh `$exposure` set on every navigation event | Call once after `onReady()` and cache the result in state or context |
+| Setting `persistConfig` without installing the AsyncStorage peer | `tryLoadAsyncStorage()` returns `null` silently; the SDK falls back to no persistence without error | Install `@react-native-async-storage/async-storage` and link it before enabling `persistConfig` |
+| Passing a different `userId` prop without memoizing `attributes` | The user context is recreated when `userId` changes; if `attributes` is also a new object it triggers a second recreation on the same render | Keep `attributes` memoized with `useMemo` whenever `userId` can change |
+
+---
+
+## Related
+
+- [React SDK →](/docs/flags/sdks/react)
+- [Flutter SDK →](/docs/flags/sdks/flutter)
+- [Quickstart →](/docs/flags/quickstart)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)

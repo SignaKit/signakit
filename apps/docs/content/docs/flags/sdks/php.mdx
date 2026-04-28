@@ -1,0 +1,386 @@
+---
+title: PHP
+description: Full API reference for signakit/flags-php — server-side feature flags with local evaluation for PHP 8.1+, framework-agnostic, with Guzzle or cURL transport.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# PHP SDK
+
+**Package:** `signakit/flags-php`  
+**Registry:** Packagist (Composer)  
+**Minimum PHP version:** 8.1+
+
+The PHP SDK fetches your flag configuration from the SignaKit CDN once on initialization, then evaluates all flags **locally** on each request — no network call per evaluation. Exposure and conversion events are sent asynchronously and do not block your request path.
+
+---
+
+## Installation
+
+```bash
+composer require signakit/flags-php
+```
+
+Guzzle is recommended but optional. If `guzzlehttp/guzzle` is installed, the SDK uses it automatically. Otherwise it falls back to cURL (no extra dependencies required).
+
+```bash
+# Recommended: install Guzzle for better HTTP handling
+composer require guzzlehttp/guzzle
+```
+
+Set your SDK key as an environment variable:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+---
+
+## Initialization
+
+Create the client **once** and register it as a singleton in your DI container or service locator. A shared instance reuses the fetched config across all requests within the same process and ensures exposure deduplication works correctly.
+
+```php
+use SignaKit\FlagsPhp\SignaKitClient;
+
+$client = new SignaKitClient(sdkKey: $_ENV['SIGNAKIT_SDK_KEY']);
+$client->initialize();
+```
+
+<Callout type="danger" title="Anti-pattern: new client per request">
+
+```php
+// ❌ Never do this — re-fetches config on every request, no dedup
+class MyController
+{
+    public function index(): Response
+    {
+        $client = new SignaKitClient($_ENV['SIGNAKIT_SDK_KEY']);
+        $client->initialize(); // network call on every request
+        // ...
+    }
+}
+```
+
+Initialize once and inject the shared instance.
+
+</Callout>
+
+### Registering as a singleton (generic DI container)
+
+Most PHP frameworks provide a DI container. Register `SignaKitClient` as a singleton so the same initialized instance is injected everywhere.
+
+```php
+// bootstrap/container.php (framework-agnostic example)
+use SignaKit\FlagsPhp\SignaKitClient;
+
+$container->singleton(SignaKitClient::class, function () {
+    $client = new SignaKitClient(sdkKey: $_ENV['SIGNAKIT_SDK_KEY']);
+    $client->initialize();
+    return $client;
+});
+```
+
+Then inject it wherever you need flag evaluation:
+
+```php
+class CheckoutController
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+    ) {}
+
+    public function show(Request $request): Response
+    {
+        $ctx = $this->signaKit->createUserContext(
+            userId: $request->user()->id,
+            attributes: ['plan' => $request->user()->plan],
+        );
+
+        $decision = $ctx->decide('checkout-redesign');
+        // ...
+    }
+}
+```
+
+### `new SignaKitClient(sdkKey, httpClient?)`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `sdkKey` | `string` | required | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `httpClient` | `HttpClientInterface\|null` | `null` | Custom HTTP client. Defaults to `GuzzleHttpClient` if Guzzle is installed, otherwise `CurlHttpClient`. |
+
+---
+
+## Initializing the client
+
+Call `initialize()` before creating any user contexts. It fetches the project config from the SignaKit CDN and blocks until the config is ready or all retries are exhausted.
+
+```php
+try {
+    $client->initialize();
+} catch (\RuntimeException $e) {
+    // Config fetch failed after 3 attempts — log and fail gracefully
+    error_log('SignaKit failed to initialize: ' . $e->getMessage());
+}
+```
+
+`onReady()` is an alias for `initialize()` — use whichever reads more naturally in your codebase:
+
+```php
+$client->onReady(); // identical to initialize()
+```
+
+**Retry behavior:** The SDK retries up to 3 times with exponential back-off (1s, 2s, 4s). If all attempts fail, a `\RuntimeException` is thrown.
+
+**ETag caching:** Calls to `refreshConfig()` send `If-None-Match` to avoid re-downloading unchanged configs. A `304 Not Modified` response reuses the in-memory config at zero bandwidth cost.
+
+<Callout type="warning" title="initialize() blocks">
+`initialize()` is synchronous and blocks until the CDN responds. Call it during your application boot phase — not inside a request handler — so the latency is absorbed at startup, not per-request.
+</Callout>
+
+---
+
+## Creating a user context
+
+A `SignaKitUserContext` represents a specific user. Create one per request with the user's ID and any attributes you want to use in targeting rules.
+
+```php
+$userContext = $client->createUserContext(
+    userId: 'user-123',
+    attributes: [
+        'plan'       => 'pro',
+        'country'    => 'US',
+        'betaTester' => true,
+    ],
+);
+```
+
+### `createUserContext(userId, attributes)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `userId` | `string` | Unique, stable identifier for the user. Used for deterministic bucketing — the same ID always produces the same variation. |
+| `attributes` | `array<string, mixed>` | Key-value pairs matched against your audience targeting rules in the dashboard. |
+
+**Throws** `\RuntimeException` if called before `initialize()`.
+
+<Callout type="info">
+
+**`$userAgent` attribute** — pass the user's `User-Agent` string as `$userAgent` to enable bot detection. Bots receive the `off` variation and do not fire exposure events.
+
+```php
+$userContext = $client->createUserContext(
+    userId: $userId,
+    attributes: [
+        '$userAgent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+        'plan'       => 'pro',
+    ],
+);
+```
+
+</Callout>
+
+---
+
+## Evaluating a single flag
+
+```php
+$decision = $userContext->decide('new-checkout');
+
+if ($decision?->enabled) {
+    // Show the new checkout experience
+    echo $decision->variationKey; // e.g. "treatment"
+}
+```
+
+### `decide(flagKey): ?Decision`
+
+Returns a `Decision` object, or `null` if the flag does not exist, the client is not ready, or the user does not match any targeting rule.
+
+| Field | Type | Description |
+|---|---|---|
+| `flagKey` | `string` | The flag key you passed in |
+| `enabled` | `bool` | Whether the flag is on for this user |
+| `variationKey` | `string` | Which variation the user is in (`"control"`, `"treatment"`, or your custom key) |
+| `ruleKey` | `string\|null` | The targeting rule that matched, or `null` if default allocation was used |
+| `ruleType` | `string\|null` | The rule type: `'ab-test'`, `'multi-armed-bandit'`, or `'targeted'`. `null` for default allocation or disabled flags. |
+
+**Always null-check the return value.** A `null` result means the flag was not found or the user did not match any rule — treat it as the disabled/control state.
+
+```php
+$decision = $userContext->decide('my-flag');
+$showFeature = $decision?->enabled ?? false;
+```
+
+---
+
+## Evaluating all flags at once
+
+```php
+$decisions = $userContext->decideAll();
+
+if ($decisions['new-checkout']?->enabled ?? false) {
+    // ...
+}
+if ($decisions['redesigned-nav']?->enabled ?? false) {
+    // ...
+}
+```
+
+### `decideAll(): array<string, Decision>`
+
+Returns an associative array keyed by flag key. Only flags where the user matches a targeting rule are included.
+
+<Callout type="warning" title="Use decideAll() selectively">
+Calling `decideAll()` evaluates every non-archived flag in your project and fires an `$exposure` event for each one the user is bucketed into. In middleware that runs on every request, only evaluate the flags your route actually needs. Using `decideAll()` in middleware is one of the most common causes of unexpected event volume spikes.
+</Callout>
+
+---
+
+## Tracking events
+
+Track a conversion or goal event that you've defined in the SignaKit dashboard.
+
+```php
+$userContext->trackEvent('purchase_completed', 99.99);
+```
+
+### `trackEvent(eventKey, value?): void`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventKey` | `string` | The event key, matching an event definition in your project |
+| `value` | `float\|null` | Optional numeric value for the event (e.g. order total, score) |
+
+**Fire and forget** — errors are logged via `error_log()` but never thrown. The method returns `void`.
+
+---
+
+## Refreshing the config
+
+Call `refreshConfig()` to pull the latest flag configuration without restarting the process. Useful for long-running PHP processes (e.g. ReactPHP, RoadRunner, Swoole) or CLI workers that run for extended periods.
+
+```php
+// Refresh config from the CDN (uses ETag — no-op if unchanged)
+$client->refreshConfig();
+```
+
+In a traditional PHP-FPM setup, each request starts a fresh process, so `refreshConfig()` is rarely needed. In persistent-process setups, call it on a schedule (e.g. every 60 seconds).
+
+---
+
+## Custom HTTP client
+
+Implement `HttpClientInterface` to use a custom HTTP transport — useful for testing, proxying, or replacing the default Guzzle/cURL clients.
+
+```php
+use SignaKit\FlagsPhp\Contracts\HttpClientInterface;
+
+final class MyHttpClient implements HttpClientInterface
+{
+    /**
+     * @return array{status: int, body: string, headers: array<string, string>}
+     */
+    public function get(string $url, array $headers = []): array
+    {
+        // return ['status' => 200, 'body' => '...', 'headers' => []]
+    }
+
+    public function post(string $url, array $headers = [], string $body = ''): void
+    {
+        // fire-and-forget POST
+    }
+}
+
+$client = new SignaKitClient(
+    sdkKey: $_ENV['SIGNAKIT_SDK_KEY'],
+    httpClient: new MyHttpClient(),
+);
+```
+
+---
+
+## PHP types reference
+
+```php
+use SignaKit\FlagsPhp\SignaKitClient;
+use SignaKit\FlagsPhp\SignaKitUserContext;
+use SignaKit\FlagsPhp\Types\Decision;
+use SignaKit\FlagsPhp\Types\ProjectConfig;
+use SignaKit\FlagsPhp\Contracts\HttpClientInterface;
+
+// Decision shape (readonly final class)
+// $decision->flagKey       string
+// $decision->variationKey  string
+// $decision->enabled       bool
+// $decision->ruleKey       string|null
+// $decision->ruleType      string|null  ('ab-test' | 'multi-armed-bandit' | 'targeted')
+
+// decideAll() return type
+// array<string, Decision>
+```
+
+`Decision` is a `readonly` class (PHP 8.2+) with public constructor-promoted properties. All fields are accessible directly — no getters required.
+
+---
+
+## A/B testing
+
+When a flag is running as an experiment, `decide()` returns the assigned variation. The SDK automatically fires an `$exposure` event the first time a user is evaluated for that flag (skipped for `targeted` rules, which are feature-flag rollouts, not experiments).
+
+```php
+$checkout = $userContext->decide('checkout-redesign');
+
+return match ($checkout?->variationKey) {
+    'treatment-a' => $this->renderCheckoutV2(),
+    'treatment-b' => $this->renderCheckoutV3(),
+    default        => $this->renderLegacyCheckout(), // null or 'control'
+};
+```
+
+Track your primary metric when the user converts:
+
+```php
+// After the user completes the purchase
+$userContext->trackEvent('purchase_completed', (float) $order->total);
+```
+
+---
+
+## Error handling
+
+`initialize()` throws `\RuntimeException` on unrecoverable failure (e.g. CDN unreachable after 3 retries). Wrap it in a try/catch during boot and decide whether to halt or continue with flags off.
+
+```php
+try {
+    $client->initialize();
+} catch (\RuntimeException $e) {
+    // Flags unavailable — log and continue; decide() will not be reachable
+    // if you chose not to register the client in the container.
+    $logger->error('SignaKit init failed', ['reason' => $e->getMessage()]);
+}
+```
+
+After a successful `initialize()`, `decide()` and `decideAll()` never throw — if a flag is not found or the user doesn't match any rule, they return `null` or an empty array respectively.
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `new SignaKitClient()` inside a request handler or controller | Re-fetches config on every request; no dedup across requests | Register as a DI singleton and inject the shared instance |
+| Not calling `initialize()` before `createUserContext()` | Throws `\RuntimeException` immediately | Call `initialize()` during application boot, before the request cycle starts |
+| `decideAll()` in middleware that runs on every route | Evaluates every flag on every request; N flags × all traffic = high event volume | Use `decide('specific-flag')` for the flag(s) your middleware actually needs |
+| Calling `decide()` inside a loop over a collection | Fires one evaluation (and potentially one exposure) per item | Evaluate once per user above the loop and apply the result to all items |
+
+---
+
+## Related
+
+- [Quickstart →](/docs/flags/quickstart)
+- [Symfony integration guide →](/docs/flags/guides/symfony)
+- [WordPress integration guide →](/docs/flags/guides/wordpress)
+- [Laravel SDK →](/docs/flags/sdks/laravel)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)

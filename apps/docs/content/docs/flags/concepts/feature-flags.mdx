@@ -1,0 +1,170 @@
+---
+title: Feature Flags
+description: How SignaKit evaluates feature flags — config fetch, local evaluation, and exposure tracking.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Feature Flags
+
+A feature flag is a named boolean gate — and optionally a variation and set of variables — that your code checks at runtime to decide what behavior to show a user. SignaKit evaluates flags entirely in memory, so every `decide()` call is a fast, synchronous operation with no network round-trip.
+
+---
+
+## How it works
+
+SignaKit uses a fetch-once, evaluate-locally model.
+
+```
+createInstance({ sdkKey })
+  → fetches full flag config from SignaKit CDN (once)
+  → stores config in memory
+
+userCtx.decide(flagKey)
+  → reads config from memory
+  → evaluates targeting rules locally
+  → fires $exposure event asynchronously (first call only)
+  → returns decision object
+```
+
+**On startup**, the SDK fetches the complete flag configuration for your project from the SignaKit CDN and holds it in memory. There is no further network activity during flag evaluation.
+
+**On each `decide()` call**, the SDK runs targeting rules against the user context you provide. The result is computed locally from the in-memory config — no HTTP request, no latency overhead, no external dependency at evaluation time.
+
+<Callout type="info">
+  Because config is fetched once at startup, initialize the client at module level (or application startup) — not on every request. Call `await client.onReady()` before evaluating flags to ensure the config has loaded.
+</Callout>
+
+---
+
+## Initializing the client
+
+```ts title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+export const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+await client.onReady()
+```
+
+`createInstance` accepts your SDK key and begins fetching config immediately. `onReady()` resolves when the config is loaded and the client is ready to evaluate flags.
+
+---
+
+## The decision object
+
+Create a user context, then call `decide()` with the flag key:
+
+```ts title="Evaluating a flag"
+const userCtx = client.createUserContext('user-123', {
+  plan: 'pro',
+  country: 'US',
+})
+
+const decision = userCtx.decide('checkout-redesign')
+```
+
+`decide()` returns a decision object, or `null` if the flag key does not exist in your project:
+
+```ts
+type Decision = {
+  enabled: boolean
+  variationKey: string
+  variables: Record<string, unknown>
+} | null
+```
+
+### `enabled`
+
+The primary boolean gate. Check this first. When `false`, serve your default / existing behavior. When `true`, the flag is active for this user.
+
+```ts
+if (decision?.enabled) {
+  // show the new checkout experience
+}
+```
+
+### `variationKey`
+
+Identifies which variation the user is assigned to. Common values are `'control'` and `'treatment'`, but you define the variation keys in the dashboard.
+
+Useful for A/B tests where you need to branch on more than two states:
+
+```ts
+switch (decision?.variationKey) {
+  case 'control':
+    return renderOriginal()
+  case 'treatment-a':
+    return renderVariantA()
+  case 'treatment-b':
+    return renderVariantB()
+}
+```
+
+### `variables`
+
+A key/value store attached to the flag. Supports strings, numbers, booleans, and JSON objects. Use variables to ship configuration alongside the flag — no code change needed to adjust a value.
+
+```ts
+const decision = userCtx.decide('banner')
+
+// Variables defined in the dashboard
+const title = decision?.variables.title as string        // "Try our new feature"
+const maxItems = decision?.variables.maxItems as number  // 5
+const showBadge = decision?.variables.showBadge as boolean // true
+```
+
+<Callout type="info">
+  `variables` is always present on the decision object when `enabled` is `true`. It will be an empty object if no variables are configured for the flag.
+</Callout>
+
+---
+
+## Flag states
+
+A flag in SignaKit is always in one of three states:
+
+**Off** — `decide()` returns `{ enabled: false, variationKey: 'off', variables: {} }` for all users. This is the default for a newly created flag.
+
+**On** — `decide()` returns `enabled: true` for all users, regardless of attributes. Use this to fully roll out a feature.
+
+**Targeted** — targeting rules are evaluated against the user's attributes and the flag's audience configuration. Some users get `enabled: true`; others get `enabled: false`. This is the standard operating mode for gradual rollouts, percentage splits, and A/B tests.
+
+<Callout type="warning">
+  Flags default to off. A flag you just created will return `enabled: false` until you explicitly turn it on or add targeting rules in the dashboard.
+</Callout>
+
+---
+
+## Exposure tracking
+
+When `decide()` is called for the first time for a given user and flag combination, the SDK automatically fires an `$exposure` event. This happens asynchronously in the background — it does not block the return value or add latency to your code path.
+
+Exposures populate the **Exposures** count in the dashboard. They represent a real user encountering a flag evaluation, making them the source of truth for experiment participation.
+
+```
+First call:  userCtx.decide('checkout-redesign')
+             → evaluates locally (sync, in-memory)
+             → fires $exposure event (async, non-blocking)
+             → returns decision
+
+Subsequent:  userCtx.decide('checkout-redesign')
+             → evaluates locally (sync, in-memory)
+             → no $exposure fired (already recorded for this context)
+             → returns decision
+```
+
+You do not need to instrument exposures manually. As long as you call `decide()` at the point in your code where the user actually experiences the flag, the exposure is recorded correctly.
+
+<Callout type="info">
+  Exposure events are batched and sent to the SignaKit event ingestion endpoint. They do not slow down flag evaluation — the evaluation itself is always a pure in-memory operation.
+</Callout>
+
+---
+
+## Related
+
+- [Targeted Delivery](/docs/flags/concepts/targeted-delivery) — how audience rules and percentage splits control which users see a flag enabled
+- [A/B Testing](/docs/flags/concepts/ab-testing) — using `variationKey` to run controlled experiments
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — the full lifecycle from config fetch to event pipeline
+- [Environments](/docs/flags/concepts/environments) — separating development and production flag state
+- [Node.js SDK](/docs/flags/sdks/node) — full API reference for the server-side SDK

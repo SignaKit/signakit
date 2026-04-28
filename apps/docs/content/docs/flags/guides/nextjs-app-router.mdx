@@ -1,0 +1,252 @@
+---
+title: Next.js App Router
+description: Integrate SignaKit feature flags into a Next.js 15 App Router application — evaluate flags in server components, pass results to client components, and track conversions.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Next.js App Router
+
+**SDK:** `@signakit/flags-node`
+**Next.js version:** 15+ (App Router)
+
+The recommended pattern for Next.js App Router is to evaluate flags in **server components**, then pass the result as a prop to any client components that need it. This keeps flag evaluation on the server — zero client bundle cost, no hydration mismatch, no loading state.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```npm
+npm install @signakit/flags-node
+```
+
+Add your SDK key to `.env.local`:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create a module-level singleton
+
+Create the client once so it is shared across all requests in the same process. In Next.js this file is evaluated once per server cold start.
+
+```ts title="lib/signakit.ts"
+'use server'
+
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+
+// Kick off config fetch immediately — resolves before the first request arrives
+export const signakit = client
+export const signakitReady = client.onReady()
+```
+
+</Step>
+
+<Step>
+
+### Read the visitor ID cookie
+
+SignaKit uses `userId` as the bucketing key — the same ID always produces the same variation. For anonymous visitors, read a stable `visitor_id` cookie. For authenticated users, use your auth session's user ID.
+
+```ts title="lib/visitor.ts"
+import { cookies } from 'next/headers'
+import { cache } from 'react'
+
+export const getVisitorId = cache(async (): Promise<string> => {
+  const cookieStore = await cookies()
+  return cookieStore.get('visitor_id')?.value ?? 'anonymous'
+})
+```
+
+`cache()` ensures `getVisitorId()` is called at most once per request even if multiple server components call it.
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating a flag in a server component
+
+```ts title="app/checkout/page.tsx"
+import { signakit, signakitReady } from '@/lib/signakit'
+import { getVisitorId } from '@/lib/visitor'
+import { CheckoutV2 } from './checkout-v2'
+import { LegacyCheckout } from './checkout-legacy'
+
+export default async function CheckoutPage() {
+  await signakitReady
+
+  const visitorId = await getVisitorId()
+  const userCtx = signakit.createUserContext(visitorId)
+  const checkout = userCtx.decide('checkout-redesign')
+
+  return checkout?.variationKey === 'treatment'
+    ? <CheckoutV2 />
+    : <LegacyCheckout />
+}
+```
+
+<Callout type="info">
+**With auth session attributes** — if you have a session, pass its data as attributes for more precise targeting:
+
+```typescript
+const session = await auth()
+const userCtx = signakit.createUserContext(session?.user.id ?? visitorId, {
+  plan: session?.user.plan ?? 'free',
+})
+```
+</Callout>
+
+---
+
+## Passing flag results to client components
+
+When a client component needs to act on a flag result, evaluate on the server and pass as a prop.
+
+```ts title="app/dashboard/page.tsx" 
+import { signakit, signakitReady } from '@/lib/signakit'
+import { getVisitorId } from '@/lib/visitor'
+import { DashboardHeader } from './dashboard-header' // 'use client'
+
+export default async function DashboardPage() {
+  await signakitReady
+  const visitorId = await getVisitorId()
+  const userCtx = signakit.createUserContext(visitorId)
+  const newNav = userCtx.decide('redesigned-nav')
+
+  return (
+    <main>
+      <DashboardHeader showNewNav={newNav?.enabled ?? false} />
+    </main>
+  )
+}
+```
+
+```ts title="app/dashboard/dashboard-header.tsx"
+'use client'
+
+export function DashboardHeader({ showNewNav }: { showNewNav: boolean }) {
+  return showNewNav ? <NewNav /> : <LegacyNav />
+}
+```
+
+<Callout type="danger" title="Never evaluate flags inside a client component">
+```typescript
+// ❌ Requires bundling the server SDK client-side — won't work
+'use client'
+
+import { signakit } from '@/lib/signakit'
+
+export function BadComponent() {
+  const decision = signakit.createUserContext('user-123').decide('my-flag') // ❌
+}
+```
+
+Evaluate in a server component and pass the boolean as a prop.
+</Callout>
+
+---
+
+## Tracking conversion events
+
+Track conversions from client components via a server action, keeping the SDK key server-side.
+
+```ts title="app/actions.ts" 
+'use server'
+
+import { signakit } from '@/lib/signakit'
+import { getVisitorId } from '@/lib/visitor'
+
+export async function trackPurchase(amount: number) {
+  const visitorId = await getVisitorId()
+  const userCtx = signakit.createUserContext(visitorId)
+  await userCtx.trackEvent('purchase_completed', { value: amount })
+}
+```
+
+```ts title="app/checkout/purchase-button.tsx"
+'use client'
+
+import { trackPurchase } from '@/app/actions'
+
+export function PurchaseButton({ amount }: { amount: number }) {
+  return (
+    <button onClick={() => trackPurchase(amount)}>
+      Complete purchase
+    </button>
+  )
+}
+```
+
+---
+
+## Middleware — route-level flag gating
+
+Use middleware to rewrite or redirect based on a flag before the page renders.
+
+```ts title="proxy.ts"
+// Next.js 16 uses proxy.ts instead of middleware.ts
+import { NextResponse } from 'next/server'
+import { signakit } from '@/lib/signakit'
+import type { NextRequest } from 'next/server'
+
+export async function middleware(request: NextRequest) {
+  const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const homepage = userCtx.decide('homepage-redesign')
+
+  if (request.nextUrl.pathname === '/' && homepage?.variationKey === 'treatment') {
+    return NextResponse.rewrite(new URL('/homepage-v2', request.url))
+  }
+
+  return NextResponse.next()
+}
+
+export const config = {
+  matcher: ['/'], // ← limit to routes that actually need the flag
+}
+```
+
+<Callout type="warning" title="Middleware runs on every matched request — keep the matcher narrow">
+Use `decide('specific-flag')` in middleware, never `decideAll()`. Set a tight `matcher` so the middleware only runs on routes that need it.
+</Callout>
+
+<Callout type="info" title="proxy.ts in Next.js 16">
+Next.js 16 uses `proxy.ts` at the project root instead of `middleware.ts`. The API is identical — only the filename changed.
+</Callout>
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside `page.tsx` | Re-fetches config on every request; loses per-instance dedup | Create the client once in `lib/signakit.ts` |
+| `decide()` inside a `'use client'` component | Requires bundling the server SDK client-side | Evaluate in the server component, pass result as prop |
+| `decideAll()` in `proxy.ts` | Evaluates every flag on every request | Use `decide('specific-flag')` with a narrow `matcher` |
+| Not awaiting `signakitReady` | `decide()` returns `null` if config hasn't loaded yet | `await signakitReady` at the top of every evaluating server component |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/flags/sdks/node)
+- [Next.js Pages Router guide →](/flags/guides/nextjs-pages-router)
+- [Next.js Middleware guide →](/flags/guides/nextjs-middleware)
+- [Concepts: A/B Testing →](/flags/concepts/ab-testing)

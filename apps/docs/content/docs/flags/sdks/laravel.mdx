@@ -1,0 +1,448 @@
+---
+title: Laravel
+description: Full API reference for signakit/flags-laravel — feature flags and A/B testing for Laravel 10, 11, and 12 with auto-discovery, a service container singleton, and a first-class Facade.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Laravel SDK
+
+**Package:** `signakit/flags-laravel`  
+**Registry:** Packagist  
+**Requirements:** PHP 8.1+ · Laravel 10, 11, or 12
+
+The Laravel SDK wraps `signakit/flags-php` and integrates it with Laravel's service container. The `SignaKitClient` is registered as a **singleton** — it fetches your flag config once on first resolution and reuses it for the lifetime of the request worker. Flag evaluation is entirely local after that: no network call per `decide()`.
+
+---
+
+## Installation
+
+<Steps>
+
+<Step>
+
+### Require the package
+
+```bash
+composer require signakit/flags-laravel
+```
+
+Laravel's package auto-discovery registers `SignaKitServiceProvider` and the `SignaKit` facade alias automatically. No changes to `config/app.php` are needed.
+
+</Step>
+
+<Step>
+
+### Add your SDK key
+
+Add your SDK key to `.env`:
+
+```dotenv
+SIGNAKIT_SDK_KEY=sk_prod_yourOrgId_yourProjectId_random
+```
+
+Find your SDK key in the SignaKit dashboard under **Project Settings → SDK Keys**.
+
+</Step>
+
+<Step>
+
+### (Optional) Publish the config
+
+If you need to inspect or customise the config file, publish it:
+
+```bash
+php artisan vendor:publish --tag=signakit-config
+```
+
+This creates `config/signakit.php`:
+
+```php
+return [
+    'sdk_key' => env('SIGNAKIT_SDK_KEY'),
+];
+```
+
+Publishing is optional — the package merges its own defaults automatically if you skip this step.
+
+</Step>
+
+</Steps>
+
+---
+
+## Service Provider
+
+`SignaKitServiceProvider` runs automatically via auto-discovery and does three things:
+
+1. Merges the `signakit` config from the package (or your published copy).
+2. Registers `SignaKitClient` as a **singleton** bound to both its class name and the `'signakit'` string alias. On first resolution it reads `config('signakit.sdk_key')`, constructs the client, and calls `initialize()` to fetch the flag config from the CDN.
+3. Binds `SignaKitManager` (non-singleton) so you can inject the convenience `forUser()` helper.
+
+```php
+// What the service provider effectively does:
+$this->app->singleton(SignaKitClient::class, function (): SignaKitClient {
+    $client = new SignaKitClient(config('signakit.sdk_key'));
+    $client->initialize(); // fetches config from CDN — runs once per worker
+    return $client;
+});
+
+$this->app->alias(SignaKitClient::class, 'signakit');
+```
+
+<Callout type="info" title="Singleton lifecycle">
+In a traditional PHP-FPM setup each worker process resolves the singleton once on the first request that touches it. In an Octane (Swoole / RoadRunner) setup the singleton lives for the entire worker lifetime across many requests — this is the most efficient configuration.
+</Callout>
+
+<Callout type="danger" title="Missing SDK key">
+If `SIGNAKIT_SDK_KEY` is absent or empty, the service provider throws a `RuntimeException` at resolution time — not at boot time. The error message includes instructions for finding your key in the dashboard. Set the env var before your first request reaches any flag-related code.
+</Callout>
+
+---
+
+## Facade
+
+`SignaKit\FlagsLaravel\Facades\SignaKit` is the primary entry point for most applications. It proxies `SignaKitClient` via the `'signakit'` container alias.
+
+```php
+use SignaKit\FlagsLaravel\Facades\SignaKit;
+
+$userContext = SignaKit::createUserContext('user-123', [
+    'plan'    => 'pro',
+    'country' => 'US',
+]);
+```
+
+The facade is automatically aliased as `SignaKit` in your application via the `extra.laravel.aliases` entry in the package's `composer.json`:
+
+```php
+// Both are equivalent:
+use SignaKit\FlagsLaravel\Facades\SignaKit;
+use SignaKit; // auto-aliased — available without the full namespace
+```
+
+---
+
+## Creating a user context
+
+A `SignaKitUserContext` represents a specific user for one evaluation pass. Create one per request, scoped to the authenticated user.
+
+### Via the Facade
+
+```php
+use SignaKit\FlagsLaravel\Facades\SignaKit;
+
+$userContext = SignaKit::createUserContext(
+    $request->user()->id,
+    ['plan' => $request->user()->plan],
+);
+```
+
+### Via dependency injection — `SignaKitClient`
+
+Type-hint `SignaKitClient` directly and the container injects the singleton:
+
+```php
+use SignaKit\FlagsPhp\SignaKitClient;
+
+class CheckoutController extends Controller
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+    ) {}
+
+    public function show(Request $request): View
+    {
+        $userContext = $this->signaKit->createUserContext(
+            $request->user()->id,
+            ['plan' => $request->user()->plan],
+        );
+
+        $decision = $userContext->decide('new-checkout');
+
+        return view('checkout', ['useNewCheckout' => $decision?->enabled ?? false]);
+    }
+}
+```
+
+### Via dependency injection — `SignaKitManager`
+
+`SignaKitManager` provides a `forUser()` shortcut that wraps `createUserContext()`:
+
+```php
+use SignaKit\FlagsLaravel\SignaKitManager;
+
+class CheckoutController extends Controller
+{
+    public function __construct(
+        private readonly SignaKitManager $flags,
+    ) {}
+
+    public function show(Request $request): View
+    {
+        $userContext = $this->flags->forUser(
+            $request->user()->id,
+            ['plan' => $request->user()->plan],
+        );
+
+        $decision = $userContext->decide('new-checkout');
+
+        return view('checkout', ['useNewCheckout' => $decision?->enabled ?? false]);
+    }
+}
+```
+
+`SignaKitManager::forUser()` and `SignaKitClient::createUserContext()` are equivalent — `forUser()` is a thin convenience wrapper.
+
+### `createUserContext(string $userId, array $attributes = [])`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `$userId` | `string` | Stable unique identifier for the user — typically their database primary key or UUID. The same ID always produces the same variation for a given flag configuration. |
+| `$attributes` | `array<string, mixed>` | Key-value pairs matched against your audience targeting rules in the dashboard (e.g. `plan`, `role`, `country`). |
+
+**Throws** `RuntimeException` if called before the client is initialized. In normal Laravel usage this cannot happen because the service provider calls `initialize()` during singleton construction.
+
+---
+
+## `decide()`
+
+Evaluate a single feature flag for this user.
+
+```php
+$decision = $userContext->decide('new-checkout');
+
+if ($decision?->enabled) {
+    return view('checkout.v2');
+}
+
+return view('checkout.legacy');
+```
+
+### Return value — `Decision`
+
+`decide()` returns a `Decision` object, or `null` if the flag does not exist or the user does not match any targeting rule. Always null-check the return value.
+
+| Property | Type | Description |
+|---|---|---|
+| `$flagKey` | `string` | The flag key that was evaluated |
+| `$variationKey` | `string` | Assigned variation key — `'control'`, `'treatment'`, a custom key, or `'off'` if the flag is stopped |
+| `$enabled` | `bool` | `true` when the flag is running and the user is in an active variation |
+| `$ruleKey` | `?string` | The targeting rule that matched, or `null` when default allocation was used |
+| `$ruleType` | `?string` | `'ab-test'`, `'multi-armed-bandit'`, or `'targeted'`. `null` for default allocation or disabled flags. |
+
+```php
+// For feature flags — just check enabled
+$enabled = $userContext->decide('beta-dashboard')?->enabled ?? false;
+
+// For A/B tests — branch on variationKey
+$decision = $userContext->decide('checkout-redesign');
+
+switch ($decision?->variationKey) {
+    case 'control':
+        return view('checkout.legacy');
+    case 'treatment-a':
+        return view('checkout.v2');
+    case 'treatment-b':
+        return view('checkout.v3');
+    default:
+        return view('checkout.legacy'); // null — flag off or user not targeted
+}
+```
+
+---
+
+## `decideAll()`
+
+Evaluate all non-archived feature flags for this user in one call.
+
+```php
+$decisions = $userContext->decideAll();
+// Returns array<string, Decision>
+
+if ($decisions['new-checkout']?->enabled) {
+    // ...
+}
+
+if ($decisions['redesigned-nav']?->enabled) {
+    // ...
+}
+```
+
+`decideAll()` returns an `array<string, Decision>` keyed by flag key. Only flags where the user matches a targeting rule are included — unmatched flags are absent from the array.
+
+<Callout type="warning" title="Use decideAll() selectively">
+Calling `decideAll()` evaluates every flag in your project. In middleware that runs on every authenticated request this means all flags are evaluated for all users on all routes — even routes that do not use flags. Use `decide('specific-flag')` in middleware or route-specific code, and reserve `decideAll()` for controllers that genuinely need multiple flag values at once.
+</Callout>
+
+---
+
+## `trackEvent()`
+
+Track a conversion or goal event you have defined in the SignaKit dashboard.
+
+```php
+$userContext->trackEvent('purchase_completed', 99.99);
+```
+
+### `trackEvent(string $eventKey, ?float $value = null): void`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `$eventKey` | `string` | The event key, matching an event definition in your SignaKit project |
+| `$value` | `?float` | Optional numeric value associated with the event (e.g. order total, score) |
+
+Fire and forget — errors are written to `error_log()` but never thrown. The method returns `void`.
+
+```php
+// After a purchase
+$userContext->trackEvent('purchase_completed', (float) $order->total);
+
+// After a sign-up (no value needed)
+$userContext->trackEvent('signup_completed');
+```
+
+---
+
+## Blade templates
+
+Evaluate flags in your controller and pass the result to the view — this keeps Blade templates free of business logic:
+
+```php
+// In your controller:
+$decision = $userContext->decide('new-dashboard');
+
+return view('dashboard', [
+    'useNewDashboard' => $decision?->enabled ?? false,
+]);
+```
+
+```blade
+{{-- In your Blade template: --}}
+@if ($useNewDashboard)
+    <x-dashboard-v2 />
+@else
+    <x-dashboard-legacy />
+@endif
+```
+
+If you need a flag value in a deeply nested partial without threading it through view data, you can use the Facade inside a `@php` block:
+
+```blade
+@php
+    $userContext = \SignaKit\FlagsLaravel\Facades\SignaKit::createUserContext(
+        auth()->id(),
+        ['plan' => auth()->user()->plan]
+    );
+    $decision = $userContext->decide('new-checkout');
+@endphp
+
+@if ($decision?->enabled)
+    <x-new-checkout />
+@else
+    <x-legacy-checkout />
+@endif
+```
+
+### Middleware pattern — sharing flag decisions across views
+
+If multiple controllers or Blade partials on the same request need the same flag values, evaluate once in middleware and share the results with all views:
+
+```php
+// app/Http/Middleware/ShareFeatureFlags.php
+namespace App\Http\Middleware;
+
+use Closure;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\View;
+use SignaKit\FlagsLaravel\Facades\SignaKit;
+use Symfony\Component\HttpFoundation\Response;
+
+class ShareFeatureFlags
+{
+    public function handle(Request $request, Closure $next): Response
+    {
+        if ($user = $request->user()) {
+            $decisions = SignaKit::createUserContext(
+                $user->id,
+                ['plan' => $user->plan, 'role' => $user->role],
+            )->decideAll();
+
+            View::share('flags', $decisions);
+        }
+
+        return $next($request);
+    }
+}
+```
+
+Register in `bootstrap/app.php` (Laravel 11+):
+
+```php
+->withMiddleware(function (Middleware $middleware) {
+    $middleware->web(append: [
+        \App\Http\Middleware\ShareFeatureFlags::class,
+    ]);
+})
+```
+
+Access the shared decisions in any Blade template:
+
+```blade
+@if (isset($flags['new-checkout']) && $flags['new-checkout']->enabled)
+    <x-new-checkout />
+@else
+    <x-legacy-checkout />
+@endif
+```
+
+---
+
+## HTTP client
+
+The PHP SDK automatically uses **Guzzle** (`guzzlehttp/guzzle`) when it is present — Laravel ships with Guzzle, so this is the transport used in practice. If Guzzle is absent the SDK falls back to a cURL-based client. No configuration is required.
+
+---
+
+## Error handling
+
+`decide()`, `decideAll()`, and `trackEvent()` never throw during normal operation. The only throwing path is `SignaKitClient::initialize()`, which is called once during singleton construction in the service provider. If the CDN is unreachable at that point, Laravel surfaces a `RuntimeException` before the request reaches your controller.
+
+If you want to guard against initialization failures in middleware:
+
+```php
+try {
+    $userContext = SignaKit::createUserContext($user->id, $attributes);
+} catch (\RuntimeException $e) {
+    logger()->warning('SignaKit unavailable', ['error' => $e->getMessage()]);
+    return $next($request); // continue without flag evaluation
+}
+```
+
+Always null-check the return value of `decide()` — it returns `null` when a flag key is not found or the user matches no rule:
+
+```php
+// Safe — never throws
+$enabled = $userContext->decide('my-flag')?->enabled ?? false;
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Resolving `SignaKitClient` manually inside a loop (per collection item, per row) | Even though the container returns the singleton, constructing a new `SignaKitUserContext` and calling `decide()` inside a loop is wasteful | Create the context once outside the loop and reuse the `Decision` result |
+| `decideAll()` in global middleware applied to every authenticated route | Evaluates every flag for every user on every request, including routes that never use flags — high unnecessary event volume | Scope the middleware to route groups that actually use flags, or call `decide('specific-flag')` per controller |
+| Calling `$decision->enabled` without a null check | `decide()` returns `null` for unknown flags — accessing a property on `null` throws a fatal error | Use the null-safe operator: `$decision?->enabled ?? false` |
+| Creating `new SignaKitClient(...)` manually instead of using the container | Bypasses the singleton; fetches config on every instantiation | Let the service container manage the client — inject it or use the Facade |
+| Using the Facade inside a queued job without verifying the singleton is initialized | Queue workers are separate processes; the singleton is initialized on first resolution in that worker's context, not on the web worker's boot | The singleton handles this correctly — but ensure `SIGNAKIT_SDK_KEY` is available in the queue worker's environment |
+
+---
+
+## Related
+
+- [PHP SDK →](/docs/flags/sdks/php)
+- [Quickstart →](/docs/flags/quickstart)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)

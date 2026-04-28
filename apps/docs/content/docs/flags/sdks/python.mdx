@@ -1,0 +1,418 @@
+---
+title: Python
+description: Full API reference for signakit-flags — async-first Python SDK for server-side feature flags with local evaluation, sync fallback, and full type hints. Compatible with Django, Flask, FastAPI, and plain scripts.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Python SDK
+
+**Package:** `signakit-flags`  
+**Registry:** PyPI  
+**Minimum Python version:** 3.11+
+
+The Python SDK fetches your flag configuration from the SignaKit CDN once on startup, then evaluates all flags **locally** on each request — no network call per evaluation. It is async-first (`httpx`) with a full synchronous fallback so it works in Django, Flask, FastAPI, WSGI workers, and plain scripts.
+
+---
+
+## Installation
+
+```bash
+pip install signakit-flags
+```
+
+Set your SDK key as an environment variable:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+---
+
+## Initialization
+
+Create the client **once at module level** — not inside a request handler or view function. A module-level singleton reuses the fetched config across all requests within the same process lifetime and ensures in-memory exposure deduplication works correctly.
+
+<Tabs items={["Async (FastAPI / ASGI)", "Sync (Django / Flask / WSGI)"]}>
+<Tab value="Async (FastAPI / ASGI)">
+
+```python title="lib/signakit.py"
+import os
+from signakit_flags import SignaKitClient
+
+client = SignaKitClient(sdk_key=os.environ["SIGNAKIT_SDK_KEY"])
+```
+
+Call `on_ready()` once at application startup — for example in a FastAPI `lifespan` handler:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from lib.signakit import client
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    result = await client.on_ready()
+    if not result.success:
+        print(f"[SignaKit] Config load failed: {result.reason}")
+    yield
+
+app = FastAPI(lifespan=lifespan)
+```
+
+</Tab>
+<Tab value="Sync (Django / Flask / WSGI)">
+
+```python title="lib/signakit.py"
+import os
+from signakit_flags import SignaKitClient
+
+client = SignaKitClient(sdk_key=os.environ["SIGNAKIT_SDK_KEY"])
+result = client.on_ready_sync()
+
+if not result.success:
+    print(f"[SignaKit] Config load failed: {result.reason}")
+```
+
+Import this module at startup — e.g. in Django's `AppConfig.ready()` or at the top of your Flask application factory.
+
+</Tab>
+</Tabs>
+
+<Callout type="danger" title="Anti-pattern: client per request">
+
+```python
+# ❌ Never do this — re-fetches config on every request, dedup provides no protection
+def my_view(request):
+    client = SignaKitClient(sdk_key=os.environ["SIGNAKIT_SDK_KEY"])
+    await client.on_ready()
+    # ...
+```
+
+Initialize once at module level and import the singleton.
+
+</Callout>
+
+### `SignaKitClient(sdk_key, **kwargs)`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `sdk_key` | `str` | required | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `events_url` | `str` | SignaKit default | Override the event ingestion endpoint |
+| `async_client` | `httpx.AsyncClient \| None` | `None` | Inject a custom async HTTP client (useful for testing) |
+| `sync_client` | `httpx.Client \| None` | `None` | Inject a custom sync HTTP client (useful for testing) |
+
+Raises `ValueError` if `sdk_key` is empty or malformed.
+
+The convenience wrapper `create_instance(sdk_key)` returns `SignaKitClient | None` — it catches any `ValueError` and returns `None` on failure, which can simplify startup code that prefers null-checking to try/except.
+
+---
+
+## Waiting for the client to be ready
+
+Call `on_ready()` (async) or `on_ready_sync()` (sync) before evaluating flags. Both fetch the config from the CDN and mark the client ready. Subsequent calls are idempotent — the CDN request uses `If-None-Match` so unchanged configs return a `304 Not Modified` and keep bandwidth minimal.
+
+<Tabs items={["Async", "Sync"]}>
+<Tab value="Async">
+
+```python
+result = await client.on_ready()
+
+if not result.success:
+    print(f"SignaKit failed to load config: {result.reason}")
+    # Fall back to defaults — create_user_context() returns None when not ready
+```
+
+</Tab>
+<Tab value="Sync">
+
+```python
+result = client.on_ready_sync()
+
+if not result.success:
+    print(f"SignaKit failed to load config: {result.reason}")
+```
+
+</Tab>
+</Tabs>
+
+Neither method raises — failures are returned as `OnReadyResult(success=False, reason=str(exc))`. After a failed ready, `create_user_context()` returns `None` and all flag evaluations return `None`.
+
+### `OnReadyResult`
+
+| Field | Type | Description |
+|---|---|---|
+| `success` | `bool` | `True` if the config was fetched successfully |
+| `reason` | `str \| None` | Error message when `success` is `False`, otherwise `None` |
+
+### `is_ready` property
+
+```python
+if client.is_ready:
+    ctx = client.create_user_context(user_id)
+```
+
+---
+
+## Creating a user context
+
+A `SignaKitUserContext` represents a specific user. Create one per request with the user's ID and any attributes you want to use in targeting rules.
+
+```python
+ctx = client.create_user_context("user-123", {
+    "plan": "pro",
+    "country": "US",
+    "beta_tester": True,
+})
+
+if ctx is None:
+    # Client is not ready — on_ready() was not called or failed
+    ...
+```
+
+### `create_user_context(user_id, attributes?)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `user_id` | `str` | Unique, stable identifier for the user. Used for deterministic bucketing — the same ID always produces the same variation. |
+| `attributes` | `UserAttributes \| None` | Key-value pairs matched against your audience targeting rules in the dashboard. `UserAttributes` is `dict[str, str \| int \| float \| bool \| list[str]]`. |
+
+Returns `SignaKitUserContext | None`. Returns `None` and logs an error if the client is not ready.
+
+<Callout type="info">
+
+**`$userAgent` attribute** — pass the request's `User-Agent` string as `$userAgent` to enable bot detection. Detected bots receive the `off` variation and do not fire exposure events, keeping experiment data clean.
+
+```python
+ctx = client.create_user_context(user_id, {
+    "$userAgent": request.headers.get("User-Agent", ""),
+    "plan": "pro",
+})
+```
+
+</Callout>
+
+---
+
+## Evaluating a single flag
+
+```python
+decision = ctx.decide("new-checkout")
+
+if decision and decision.enabled:
+    # Show the new checkout experience
+    print(decision.variation_key)  # e.g. "treatment"
+```
+
+### `decide(flag_key) → Decision | None`
+
+Returns a `Decision` dataclass, or `None` if the flag does not exist, the client is not ready, or the user does not match any targeting rule.
+
+| Field | Type | Description |
+|---|---|---|
+| `flag_key` | `str` | The flag key you passed in |
+| `enabled` | `bool` | Whether the flag is on for this user |
+| `variation_key` | `str` | Which variation the user is in (`"control"`, `"treatment"`, or your custom key) |
+| `rule_key` | `str \| None` | The targeting rule that matched, or `None` for default/disabled paths |
+| `rule_type` | `str \| None` | `"ab-test"`, `"multi-armed-bandit"`, or `"targeted"` — `None` for default/disabled |
+| `variables` | `dict[str, VariableValue]` | Resolved variable values for the assigned variation |
+
+**Always check the return value.** A `None` result means the flag was not found or the user did not match any rule — treat it as the disabled/control state.
+
+```python
+decision = ctx.decide("my-flag")
+show_feature = decision.enabled if decision is not None else False
+```
+
+`decide()` is synchronous and CPU-bound — no `await` needed. Exposure events are dispatched in the background: if a running event loop is detected, the event is scheduled as a coroutine task; otherwise it is sent via the sync transport.
+
+---
+
+## Evaluating all flags at once
+
+```python
+decisions = ctx.decide_all()
+
+if decisions.get("new-checkout", {}).enabled:
+    ...
+if decisions.get("redesigned-nav", {}).enabled:
+    ...
+```
+
+### `decide_all() → Decisions`
+
+Returns a `dict[str, Decision]` keyed by flag key. Only flags where the user matches a targeting rule are included. Archived flags are excluded.
+
+<Callout type="warning" title="Use decide_all() selectively">
+Calling `decide_all()` evaluates every flag in your project and fires an `$exposure` event for each one the user is bucketed into. In middleware or base view classes that run on every request, only evaluate the flags your route actually needs. Using `decide_all()` across all traffic is one of the most common causes of unexpected event volume spikes.
+</Callout>
+
+---
+
+## Tracking events
+
+Track a conversion or goal event that you've defined in the SignaKit dashboard. `track_event` is an async method — use `await` in async contexts.
+
+```python
+await ctx.track_event("purchase_completed", value=99.99, metadata={"plan": "pro"})
+```
+
+### `track_event(event_key, value?, metadata?)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `event_key` | `str` | The event name, matching an event definition in your project. Truncated to 100 characters. |
+| `value` | `float \| None` | Optional numeric value for the event (e.g. revenue, score) |
+| `metadata` | `dict[str, Any] \| None` | Optional freeform metadata. Dropped silently if the serialized JSON exceeds 5,000 bytes. |
+
+**Returns:** `Coroutine[None]` — fire and forget. Errors are logged but never raised. Bot users are silently skipped.
+
+<Callout type="info">
+
+There is no `track_event_sync()`. In a WSGI environment where you cannot `await`, schedule the coroutine from a sync context using `asyncio.run()` or your framework's task runner:
+
+```python
+import asyncio
+
+# In a sync Django view
+asyncio.run(ctx.track_event("purchase_completed", value=49.99))
+```
+
+Or spin up an event loop only once and submit tasks to it, depending on your deployment setup.
+
+</Callout>
+
+---
+
+## Type hints
+
+All public types are exported directly from `signakit_flags`:
+
+```python
+from signakit_flags import (
+    SignaKitClient,
+    SignaKitUserContext,
+    Decision,
+    Decisions,
+    OnReadyResult,
+    UserAttributes,
+    VariableValue,
+    TrackEventOptions,
+)
+```
+
+### Key type aliases
+
+```python
+# User attribute values — the $userAgent key accepts a str
+UserAttributes = dict[str, str | int | float | bool | list[str]]
+
+# Variable value — string, number, bool, or a JSON object
+VariableValue = str | int | float | bool | dict[str, Any]
+
+# decide_all() return type
+Decisions = dict[str, Decision]
+```
+
+### `Decision` dataclass
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    flag_key: str
+    variation_key: str
+    enabled: bool
+    rule_key: str | None
+    rule_type: str | None          # "ab-test" | "multi-armed-bandit" | "targeted" | None
+    variables: dict[str, VariableValue]
+```
+
+The SDK is typed with `mypy --strict` and ships inline type annotations — no stub package needed.
+
+---
+
+## A/B testing
+
+When a flag is running as an experiment, `decide()` returns the assigned variation. The SDK automatically dispatches an `$exposure` event the first time a user is evaluated for that flag.
+
+```python
+checkout = ctx.decide("checkout-redesign")
+
+variation = checkout.variation_key if checkout else "control"
+
+if variation == "treatment-a":
+    return render_checkout_v2(request)
+elif variation == "treatment-b":
+    return render_checkout_v3(request)
+else:
+    return render_legacy_checkout(request)
+```
+
+Track your primary metric when the user converts:
+
+```python
+# After the user completes the purchase
+await ctx.track_event("purchase_completed", value=order.total)
+```
+
+---
+
+## Targeted delivery
+
+When a flag is configured as a targeted rollout (not an experiment), `decide()` returns `enabled=True` for users who match the audience rule. No primary metric is needed and no `$exposure` event is fired — targeted rules are feature rollouts, not experiments.
+
+```python
+beta_access = ctx.decide("beta-dashboard")
+
+if beta_access and beta_access.enabled:
+    return redirect("/dashboard/beta")
+```
+
+Bucketing is deterministic — the same `user_id` always produces the same outcome for the same flag configuration.
+
+---
+
+## Error handling
+
+`on_ready()` and `on_ready_sync()` never raise. If the config fetch fails, they return `OnReadyResult(success=False, reason=...)`. After that, `create_user_context()` returns `None`, and `decide()` / `decide_all()` return `None` / `{}` — your code should treat these as the default/off state.
+
+```python
+result = await client.on_ready()
+if not result.success:
+    logger.warning("SignaKit unavailable, using defaults: %s", result.reason)
+
+# This is always safe — create_user_context returns None if not ready
+ctx = client.create_user_context(user_id, attributes)
+if ctx is None:
+    show_feature = False
+else:
+    decision = ctx.decide("my-flag")
+    show_feature = decision.enabled if decision else False
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `SignaKitClient(...)` inside a Django view or Flask route | Re-fetches config on every request; dedup is per-instance so every request fires a fresh exposure | Create the client once at module level and import the singleton |
+| Not calling `on_ready()` / `on_ready_sync()` before the first `decide()` | `create_user_context()` returns `None` if the config hasn't loaded | Call `on_ready()` at application startup, not lazily inside a view |
+| `await`-ing `track_event` without an active event loop | `RuntimeError: no running event loop` in sync WSGI views | Use `asyncio.run(ctx.track_event(...))` or restructure around an async framework |
+| `decide_all()` in a Django middleware or Flask `before_request` | Evaluates every flag on every request; N flags × all traffic = high event volume | Use `ctx.decide("specific-flag")` for flags needed per-route |
+| Evaluating a flag inside a loop (e.g. per list item or per row) | One exposure per item per render — inflates event counts | Evaluate once per user before the loop, apply the result to all items |
+| Ignoring a `None` return from `decide()` | `AttributeError: 'NoneType' object has no attribute 'enabled'` | Always guard with `if decision and decision.enabled` or `decision.enabled if decision else False` |
+
+---
+
+## Related
+
+- [Quickstart →](/docs/flags/quickstart)
+- [Django guide →](/docs/flags/guides/django)
+- [Flask guide →](/docs/flags/guides/flask)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

@@ -1,0 +1,194 @@
+---
+title: Browser
+description: Full API reference for @signakit/flags-browser — client-side feature flags with CDN-fetched config, local evaluation, and sessionStorage exposure deduplication.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Browser SDK
+
+**Package:** `@signakit/flags-browser`
+**Registry:** npm
+**Environments:** Browser (ESM), bundler required (Webpack, Vite, Turbopack)
+
+The browser SDK fetches your flag config from the SignaKit CDN once on initialization, then evaluates all flags **locally** — no network call per `decide()`. Exposure events are deduplicated via `sessionStorage` so each user only fires one `$exposure` per flag per browser session.
+
+<Callout type="info">
+**Using React?** Use `@signakit/flags-react` instead — it wraps this package with `SignaKitProvider`, `useFlag`, and `FlagGate`, handling initialization, loading state, and context propagation. See the [React SDK →](/docs/flags/sdks/react)
+</Callout>
+
+---
+
+## Installation
+
+```npm
+npm install @signakit/flags-browser
+```
+
+---
+
+## Initialization
+
+```js title="lib/signakit.js"
+import { createInstance } from '@signakit/flags-browser'
+
+const client = createInstance({
+  sdkKey: 'sk_prod_yourOrgId_yourProjectId_random',
+})
+
+if (!client) {
+  console.error('Invalid SDK key format')
+} else {
+  const { success, reason } = await client.onReady()
+  if (!success) {
+    console.error('Failed to load flags:', reason)
+  }
+}
+```
+
+`createInstance()` returns `null` for malformed SDK keys — always null-check before calling `onReady()`.
+
+### Config options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `sdkKey` | `string` | required | Your SignaKit browser SDK key |
+| `timeout` | `number` | `5000` | Config fetch timeout in milliseconds |
+| `retries` | `number` | `3` | Fetch retries with exponential backoff |
+
+---
+
+## `onReady()`
+
+Fetches the flag config from the SignaKit CDN. Resolves when the config is ready or all retries are exhausted.
+
+```js
+const { success, reason } = await client.onReady()
+// success: true  → client.createUserContext() is safe to call
+// success: false → reason explains the failure; decide() returns null
+```
+
+Subsequent calls to `onReady()` resolve immediately — the config is cached in memory for the instance lifetime.
+
+**ETag-based refresh** — the SDK sends `If-None-Match` on background refreshes. The CDN returns `304 Not Modified` when the config hasn't changed, keeping bandwidth minimal.
+
+**Circuit breaker** — if the CDN is unreachable after all retries, `onReady()` resolves with `success: false`. The client serves the last cached config from `sessionStorage` if available. `decide()` returns `null` when there is no cached config.
+
+---
+
+## Creating a user context
+
+```js
+const userContext = client.createUserContext('user-123', {
+  plan: 'pro',
+  country: 'US',
+  betaTester: true,
+})
+if (!userContext) {
+  // userId was empty string
+}
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `userId` | `string` | Stable unique identifier. Must be non-empty — returns `null` for empty string. |
+| `attributes` | `Record<string, string \| number \| boolean>` | Matched against audience targeting rules. |
+
+Pass `$userAgent: navigator.userAgent` to enable bot detection — bots receive the `off` variation and skip event tracking.
+
+---
+
+## `decide(flagKey)` → `Decision | null`
+
+```js
+const decision = userContext.decide('new-checkout')
+
+if (decision?.enabled) {
+  renderNewCheckout()
+}
+```
+
+Returns `null` when the flag doesn't exist, the client isn't ready, or the user doesn't match any rule. Treat `null` as the default/off state.
+
+| Field | Type | Description |
+|---|---|---|
+| `flagKey` | `string` | The key you passed in |
+| `enabled` | `boolean` | Whether the flag is on for this user |
+| `variationKey` | `string` | Assigned variation: `"control"`, `"treatment"`, or a custom key |
+| `ruleKey` | `string` | The rule that matched this user |
+
+---
+
+## `decideAll()` → `Record<string, Decision>`
+
+```js
+const decisions = userContext.decideAll()
+// Only flags where the user matches a rule are included
+```
+
+<Callout type="warning">
+`decideAll()` fires an `$exposure` event for every flag the user is bucketed into. Call it once after `onReady()` — not on route changes or re-renders.
+</Callout>
+
+---
+
+## `trackEvent(eventName, properties?)`
+
+```js
+await userContext.trackEvent('purchase_completed', {
+  value: 49.99,
+  plan: 'pro',
+})
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventName` | `string` | Matches an event definition in your SignaKit project |
+| `properties` | `Record<string, string \| number \| boolean>` | Optional metadata |
+
+Fire and forget — returns `Promise<void>`. Errors are logged but never thrown.
+
+---
+
+## Exposure deduplication
+
+Uses `sessionStorage` to track already-exposed flags in the current browser session.
+
+```
+sessionStorage key: sk_exposed_{flagKey}_{userId}
+```
+
+The first `decide('my-flag')` call for a `userId` fires `$exposure` and sets the key. All subsequent calls within the same tab session are silent. Opening a new tab starts a fresh session.
+
+---
+
+## TypeScript types
+
+```js
+import type {
+  SignaKitBrowserClient,
+  SignaKitUserContext,
+  BrowserDecision,
+  BrowserDecisions,
+} from '@signakit/flags-browser'
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `decide()` inside a React render function | Fires evaluation on every render; bypasses Provider dedup | Use `@signakit/flags-react` |
+| `createInstance()` called multiple times | Each instance fetches config independently | Create one instance at app init and export it |
+| Not awaiting `onReady()` before `decide()` | Returns `null` if config hasn't loaded | Await `onReady()` before first evaluation |
+| `decideAll()` on every route change | Fires a fresh exposure set on each navigation | Call once after `onReady()`, cache in state |
+
+---
+
+## Related
+
+- [React SDK →](/docs/flags/sdks/react)
+- [React SPA guide →](/docs/flags/guides/react-spa)
+- [Quickstart →](/docs/flags/quickstart)

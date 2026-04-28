@@ -1,0 +1,262 @@
+---
+title: SDK Architecture
+description: How SignaKit SDKs work internally — config fetch, local evaluation, async event tracking, and the full lifecycle from init to ingest.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# SDK Architecture
+
+SignaKit SDKs are built around a single architectural principle: **fetch the config once, evaluate every flag locally, track events asynchronously**. There are no per-evaluation API calls. `decide()` is a pure in-memory computation that returns in under a millisecond.
+
+This document explains how that works end-to-end — from `createInstance` to the event ingest pipeline.
+
+---
+
+## Overview
+
+```
+createInstance({ sdkKey })
+  → HTTP GET: SignaKit CDN (full flag config, JSON)
+  → stores config in memory
+  → onReady() resolves
+
+userCtx.decide(flagKey)
+  → hash(userId + flagKey) → bucket number
+  → walk targeting rules in memory
+  → return decision (sync, ~< 1ms)
+  → enqueue $exposure event (async, non-blocking)
+
+event queue
+  → batched HTTP POST → Lambda (validates, sends to SQS)
+  → consumer Lambda → PostgreSQL + S3
+```
+
+No network call happens during `decide()`. The CDN fetch is a one-time operation per process lifetime, refreshed on a background interval.
+
+---
+
+## Initialization
+
+When you call `createInstance({ sdkKey })`, the SDK immediately begins an HTTP GET request to the SignaKit CDN. The response is a single JSON payload containing all flag configs for your project — every flag, its targeting rules, audience definitions, variation assignments, and traffic splits.
+
+```ts title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+export const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+await client.onReady()
+```
+
+`onReady()` returns a promise that resolves when the CDN fetch completes and the config is stored in memory. Until `onReady()` resolves, `decide()` returns `null` — unless a cached config from a previous run is available (see [Caching](#caching-mobile-sdks) below).
+
+<Callout type="info">
+  Initialize the client once at module or application startup — not on each request. The fetch is per-process, not per-user. Calling `createInstance` inside a request handler defeats the fetch-once model and adds unnecessary latency.
+</Callout>
+
+<Callout type="warning">
+  If you evaluate flags before `onReady()` resolves and no cached config is available, `decide()` will return `null`. Always await `onReady()` during startup, or implement a fallback behavior for null decisions.
+</Callout>
+
+---
+
+## Local evaluation
+
+Flag evaluation is a pure in-memory operation. When you call `decide()`, the SDK:
+
+<Steps>
+
+<Step>
+
+### Hash userId + flagKey to a bucket
+
+The SDK hashes the combination of the user ID and flag key using a deterministic algorithm (MurmurHash). The result maps to a number in the range 0–9999, which acts as the user's bucket for that flag.
+
+This means the same user always lands in the same bucket for the same flag, regardless of which server handles the request or how many times `decide()` is called. Bucketing is stable for the life of the flag.
+
+</Step>
+
+<Step>
+
+### Walk the flag's targeting rules
+
+The SDK checks targeting rules in order. Each rule defines an audience condition (attribute matchers, percentage range, or both) and a variation assignment. The SDK walks the rules until one matches — or falls through to the default variation if none do.
+
+Audience conditions are evaluated against the attributes you passed to `createUserContext()`. This is a simple in-memory comparison: string equality, numeric range, set membership, regex — all local, all synchronous.
+
+</Step>
+
+<Step>
+
+### Return the decision
+
+The matched rule determines whether the flag is enabled and which variation key the user receives. The SDK returns a decision object immediately.
+
+```ts
+const userCtx = client.createUserContext('user-123', { plan: 'pro', country: 'US' })
+const decision = userCtx.decide('checkout-redesign')
+// decision: { enabled: true, variationKey: 'treatment', variables: { ... } }
+```
+
+Typical evaluation latency is under 1ms. Because there is no I/O, evaluation time does not scale with traffic — it is O(1) per call regardless of how many concurrent requests your server handles.
+
+</Step>
+
+</Steps>
+
+<Callout type="info">
+  The in-memory config is a snapshot. If you change a flag in the dashboard, running processes will not see it instantly — they will pick it up on the next config refresh cycle. See [Config refresh](#config-refresh) below.
+</Callout>
+
+---
+
+## Exposure and event tracking
+
+The first time `decide()` is called for a given user and flag combination within a user context, the SDK enqueues an `$exposure` event. This records that the user was exposed to the flag evaluation — it is the source of truth for experiment participation counts in the dashboard.
+
+Subsequent calls to `decide()` for the same user context and flag key do not enqueue a second exposure.
+
+```
+First call:  userCtx.decide('checkout-redesign')
+             → evaluates locally (sync, in-memory)
+             → enqueues $exposure event (async, non-blocking)
+             → returns decision
+
+Second call: userCtx.decide('checkout-redesign')
+             → evaluates locally (sync, in-memory)
+             → no $exposure enqueued (already recorded)
+             → returns decision
+```
+
+The event queue is flushed in the background. The SDK batches accumulated events and sends them as a single HTTP POST to the SignaKit event ingest endpoint. This flush happens asynchronously — it does not block `decide()` or your request path.
+
+The same queue handles `trackEvent()` calls for custom conversion events. Both exposure events and custom events flow through the same pipeline:
+
+```
+SDK event queue
+  → batched HTTP POST
+  → Lambda: validates SDK key, forwards to SQS
+  → consumer Lambda: writes to PostgreSQL + S3
+```
+
+The ingest path is entirely asynchronous. A slow or unavailable ingest endpoint does not affect flag evaluation — the SDK continues to operate from its in-memory config.
+
+<Callout type="info">
+  In server environments, call `client.close()` (or the equivalent flush method in your SDK) during graceful shutdown. This ensures any buffered events are flushed before the process exits, so no exposure or conversion data is lost.
+</Callout>
+
+---
+
+## Config refresh
+
+The SDK polls the SignaKit CDN on a background interval to pick up flag changes without restarting the process. The default polling interval varies by SDK:
+
+| SDK | Default interval |
+|-----|-----------------|
+| Node.js | 30s |
+| Python, Go, Java | 30s |
+| PHP, Laravel | 60s |
+| Browser, React | 60s |
+| Flutter, React Native | 60s |
+
+When a new config is fetched, it replaces the in-memory config atomically. Subsequent `decide()` calls use the new config. In-flight evaluations that started before the swap complete against the old config — there is no partial state.
+
+### Force a refresh
+
+Some SDKs expose a `client.refresh()` method to trigger an immediate config fetch outside the polling cycle. This is useful after you make a flag change in the dashboard and need to pick it up in a long-running process without waiting for the next poll.
+
+```ts
+// Force an immediate config fetch
+await client.refresh()
+```
+
+### What happens mid-request
+
+Because config is swapped atomically, a user that calls `decide()` twice within the same request will always get the same variation — the config does not change between two calls in the same event loop tick. The swap only takes effect between polling cycles.
+
+---
+
+## Caching (mobile SDKs)
+
+Mobile SDKs — Flutter and React Native — persist the fetched config to local device storage. On startup, if the network is unavailable or the CDN fetch has not yet completed, the SDK loads the cached config and begins evaluating flags immediately from the last known state.
+
+This means:
+
+- `onReady()` resolves immediately when a cached config is available, even before the network fetch completes.
+- If the network fetch succeeds, the in-memory config is updated and the cache is written with the fresh payload.
+- If the network fetch fails and no cache exists, `decide()` returns `null` until a fetch succeeds.
+
+The cache is keyed by SDK key, so multiple environments on the same device do not share config.
+
+<Callout type="info">
+  Server and browser SDKs do not persist config to disk. They hold config in process memory (server) or JavaScript heap (browser). If the process restarts with no network access, the SDK starts without config until the CDN is reachable.
+</Callout>
+
+---
+
+## Server vs. browser SDKs
+
+Both server and browser SDKs use the same fetch-once, evaluate-locally model. The differences are operational:
+
+| | Server SDKs | Browser SDKs |
+|--|------------|--------------|
+| **SDKs** | `flags-node`, Python, Go, Java, PHP, Laravel | `flags-browser`, `flags-react`, `flags-react-native`, Flutter |
+| **Config location** | Process memory, shared across all requests | JavaScript heap, per tab/instance |
+| **Config lifetime** | Persists until process restart or refresh | Discarded when tab closes; reloaded on next init |
+| **SDK key** | Set as a server environment variable | Bundled in client-side code |
+| **Config contents** | Full flag config | Full flag config (identical payload) |
+
+The SDK key is not a secret. It identifies your project but does not grant access to the SignaKit API or dashboard. Exposing it in browser-side code is expected and safe. Admin operations — creating flags, modifying rules, reading raw event data — require an API key, which is separate and must never be exposed client-side.
+
+Server SDKs benefit from one config fetch being amortized across every request the process handles. A Node.js server handling 10,000 requests per second still makes only one CDN fetch per polling interval, not 10,000.
+
+Browser SDKs fetch config once per page load (or app session, for React Native and Flutter). Each browser tab maintains its own copy of the config in memory.
+
+---
+
+## Architecture diagram
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Application process (server) or browser tab         │
+│                                                     │
+│  createInstance({ sdkKey })                         │
+│       │                                             │
+│       ▼                                             │
+│  CDN fetch (once)  ────────────► SignaKit CDN       │
+│       │                                             │
+│       ▼                                             │
+│  In-memory config                                   │
+│  (flags + rules + audiences)                        │
+│       │                                             │
+│       ▼                                             │
+│  decide(flagKey)  ◄── createUserContext(id, attrs)  │
+│       │                                             │
+│       ├── hash(userId + flagKey) → bucket           │
+│       ├── walk targeting rules                      │
+│       └── return decision  (< 1ms, no network)      │
+│                                                     │
+│  Event queue                                        │
+│       │  (batched, async flush)                     │
+│       ▼                                             │
+└─────────────────────────────────────────────────────┘
+         │
+         ▼
+  Lambda (validate key, send to SQS)
+         │
+         ▼
+  Consumer Lambda
+         │
+         ├──► PostgreSQL (experiment results)
+         └──► S3 (raw event archive)
+```
+
+---
+
+## Related
+
+- [Feature Flags](/docs/flags/concepts/feature-flags) — decision object shape, flag states, and exposure tracking
+- [Targeted Delivery](/docs/flags/concepts/targeted-delivery) — how audience rules and percentage splits are structured
+- [A/B Testing](/docs/flags/concepts/ab-testing) — how bucketing is used to run controlled experiments
+- [Events & Metrics](/docs/flags/concepts/events-and-metrics) — `trackEvent()` and the conversion event pipeline
+- [Node.js SDK](/docs/flags/sdks/node) — full API reference for the server-side SDK

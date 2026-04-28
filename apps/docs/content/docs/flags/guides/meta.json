@@ -1,0 +1,18 @@
+{
+  "title": "Framework Guides",
+  "pages": [
+    "nextjs-app-router",
+    "nextjs-pages-router",
+    "nextjs-middleware",
+    "remix",
+    "express",
+    "fastify",
+    "nestjs",
+    "react-spa",
+    "react-native-expo",
+    "flutter-mobile",
+    "laravel-guide",
+    "symfony",
+    "wordpress"
+  ]
+}

@@ -1,0 +1,174 @@
+---
+title: Quickstart
+description: Get your first SignaKit feature flag evaluating in 5 minutes.
+---
+
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Quickstart
+
+Get a feature flag evaluating in your app in 5 minutes.
+
+<Steps>
+
+<Step>
+
+## Create a project and copy your SDK key
+
+In the [SignaKit dashboard](https://app.signakit.com), create a project and navigate to **Settings → API Keys**. Copy a `sk_dev_` key for local development.
+
+<Callout type="info">
+  Use `sk_dev_` keys in development and `sk_prod_` keys in production. Never expose a production key in client-side code — use `@signakit/flags-browser` or `@signakit/flags-react` for browser environments, which use the same key format.
+</Callout>
+
+</Step>
+
+<Step>
+
+## Install the SDK
+
+<Tabs items={['Node / Next.js', 'React', 'Python', 'Go', 'PHP / Laravel', 'Java', 'Flutter', 'React Native']}>
+
+<Tab>
+```bash
+npm install @signakit/flags-node
+```
+</Tab>
+
+<Tab>
+```bash
+npm install @signakit/flags-react @signakit/flags-browser
+```
+</Tab>
+
+<Tab>
+```bash
+pip install signakit-flags
+```
+</Tab>
+
+<Tab>
+```bash
+go get github.com/signakit/flags-golang@latest
+```
+</Tab>
+
+<Tab>
+```bash
+composer require signakit/flags-php
+# or for Laravel
+composer require signakit/flags-laravel
+```
+</Tab>
+
+<Tab>
+```xml
+<!-- Maven -->
+<dependency>
+  <groupId>com.signakit</groupId>
+  <artifactId>flags-java</artifactId>
+  <version>0.1.0</version>
+</dependency>
+```
+</Tab>
+
+<Tab>
+```yaml
+# pubspec.yaml
+dependencies:
+  signakit_flags: ^0.1.0
+```
+</Tab>
+
+<Tab>
+```bash
+npx expo install @signakit/flags-react-native
+```
+</Tab>
+
+</Tabs>
+
+</Step>
+
+<Step>
+
+## Initialize and evaluate
+
+<Tabs items={['Node / Next.js', 'React', 'Python']}>
+
+<Tab>
+```typescript
+import { createInstance } from '@signakit/flags-node'
+
+// Initialize once at module level — not per request
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+await client.onReady()
+
+const userCtx = client.createUserContext('user-123', { plan: 'pro' })
+const decision = userCtx.decide('my-first-flag')
+
+if (decision?.enabled) {
+  // show the new experience
+}
+```
+</Tab>
+
+<Tab>
+```tsx
+import { SignaKitProvider, useFlag } from '@signakit/flags-react'
+
+function App() {
+  return (
+    <SignaKitProvider sdkKey="sk_dev_xxxx" userId="user-123">
+      <MyComponent />
+    </SignaKitProvider>
+  )
+}
+
+function MyComponent() {
+  const { enabled } = useFlag('my-first-flag')
+  return enabled ? <NewExperience /> : <CurrentExperience />
+}
+```
+</Tab>
+
+<Tab>
+```python
+from signakit_flags import SignaKitClient
+
+client = SignaKitClient(sdk_key="sk_dev_xxxx")
+ready = await client.on_ready()
+
+user = client.create_user_context("user-123", {"plan": "pro"})
+decision = user.decide("my-first-flag")
+
+if decision and decision.enabled:
+    # show the new experience
+```
+</Tab>
+
+</Tabs>
+
+</Step>
+
+<Step>
+
+## View the result in the dashboard
+
+Head to your project's **Flags** list. SignaKit shows live exposure counts as your SDK fires `$exposure` events. If you don't see data yet, check that:
+
+1. Your SDK key matches the project you're viewing
+2. `onReady()` returned `success: true` before calling `decide()`
+3. You're looking at the correct environment (dev vs. prod)
+
+</Step>
+
+</Steps>
+
+## Next steps
+
+- **[Node.js SDK reference →](/flags/sdks/node)** — full API for the server-side SDK
+- **[Concepts: Feature Flags →](/flags/concepts/feature-flags)** — how flag evaluation works
+- **[Next.js App Router guide →](/flags/guides/nextjs-app-router)** — full integration walkthrough

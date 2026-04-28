@@ -1,0 +1,291 @@
+---
+title: User IDs
+description: Why SignaKit requires a stable user ID, how to get or generate one, and how to store it correctly for anonymous and authenticated users.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+
+# User IDs
+
+Every SignaKit SDK call starts with a user ID. It is the first required argument to `createUserContext` and the key that determines which flag variation or experiment bucket a user lands in. Without a stable user ID, targeting rules produce inconsistent results and experiment data becomes unreliable.
+
+---
+
+## Why a user ID is required
+
+SignaKit uses deterministic bucketing. When you call `decide()`, the SDK hashes the `userId` and `flagKey` together to produce a stable bucket number. That number maps to a flag state or experiment variation.
+
+The consequence: **the same userId always produces the same decision**. A user who sees variation `treatment` on Monday will see it again on Thursday — whether they are on their laptop, phone, or a different browser session — as long as the userId is the same.
+
+Change the userId and the bucket changes. A user who was in `control` might jump to `treatment` mid-experiment. That contaminates your data and breaks the user's experience.
+
+<Callout type="warning">
+  Never change the userId mid-session if you are running experiments. Pick a userId at the start of the session and use it consistently for every `decide()` and `trackEvent()` call.
+</Callout>
+
+---
+
+## If you already have a user ID — use it
+
+If your app has authenticated users, you already have a stable, unique user ID. Use it directly.
+
+Good sources:
+
+- **Database user ID** — your `users.id` primary key
+- **Auth provider user ID** — the subject claim (`sub`) from your JWT, or the user ID from your auth provider
+- **Stripe customer ID** — stable and already tied to a real person
+
+<Tabs items={['Node.js', 'React', 'Python', 'Go']}>
+
+<Tab>
+```typescript title="server.ts"
+// userId from your session or JWT
+const userCtx = client.createUserContext(session.userId, {
+  plan: session.plan,
+  country: session.country,
+})
+
+const decision = userCtx.decide('new-dashboard')
+```
+</Tab>
+
+<Tab>
+```tsx title="App.tsx"
+<SignaKitProvider
+  sdkKey="sk_dev_xxxx"
+  userId={session.userId}
+  attributes={{ plan: session.plan }}
+>
+  <App />
+</SignaKitProvider>
+```
+</Tab>
+
+<Tab>
+```python title="server.py"
+user = client.create_user_context(session["user_id"], {
+    "plan": session["plan"],
+    "country": session["country"],
+})
+
+decision = user.decide("new-dashboard")
+```
+</Tab>
+
+<Tab>
+```go title="server.go"
+userCtx := client.CreateUserContext(session.UserID, map[string]interface{}{
+    "plan":    session.Plan,
+    "country": session.Country,
+})
+
+decision := userCtx.Decide("new-dashboard")
+```
+</Tab>
+
+</Tabs>
+
+No extra setup needed. Your auth system already solved the hard part.
+
+---
+
+## Generating an anonymous ID
+
+Many apps serve users before they log in — marketing pages, onboarding flows, public tools. These users do not have a user ID yet, but you still need a stable one to use SignaKit.
+
+The right approach: generate a UUID v4 and persist it.
+
+### Why UUID v4
+
+UUID v4 is a randomly generated 128-bit identifier. It is:
+
+- **Unique enough.** The collision probability across billions of IDs is negligible.
+- **Opaque.** It reveals nothing about the user.
+- **Universally supported.** Every language has a built-in or well-maintained library for it.
+
+### Generating a UUID v4
+
+<Tabs items={['Node.js', 'Python', 'Go', 'PHP', 'Flutter']}>
+
+<Tab>
+```typescript
+// Built-in (Node 16+)
+const visitorId = crypto.randomUUID()
+
+// Or with the uuid package
+import { v4 as uuidv4 } from 'uuid'
+const visitorId = uuidv4()
+```
+</Tab>
+
+<Tab>
+```python
+import uuid
+
+visitor_id = str(uuid.uuid4())
+```
+</Tab>
+
+<Tab>
+```go
+import "github.com/google/uuid"
+
+visitorID := uuid.New().String()
+```
+</Tab>
+
+<Tab>
+```php
+use Ramsey\Uuid\Uuid;
+
+$visitorId = Uuid::uuid4()->toString();
+```
+</Tab>
+
+<Tab>
+```dart
+import 'package:uuid/uuid.dart';
+
+const visitorId = Uuid().v4();
+```
+</Tab>
+
+</Tabs>
+
+### What not to use
+
+| Approach | Problem |
+|---|---|
+| IP address | Shared by multiple users (NAT, offices). Changes over time. |
+| Session ID | Expires. Creates a new ID every session — breaks bucketing. |
+| Device fingerprint | Unreliable across browsers and updates. Raises privacy concerns. |
+
+---
+
+## Storing the anonymous ID
+
+Generating a UUID is the easy part. Storing it correctly so it survives across page loads and sessions is what matters.
+
+### Server-side apps (Node.js, Python, Go, PHP, etc.)
+
+Store the UUID in an `httpOnly` cookie. The `httpOnly` flag prevents JavaScript from reading it, which eliminates a class of XSS attacks. Set `Secure` so it is only sent over HTTPS, and `SameSite=Lax` to prevent CSRF misuse.
+
+```typescript title="middleware.ts (Express)"
+import { Request, Response, NextFunction } from 'express'
+import { randomUUID } from 'crypto'
+
+export function visitorId(req: Request, res: Response, next: NextFunction) {
+  if (!req.cookies.visitor_id) {
+    const id = randomUUID()
+    res.cookie('visitor_id', id, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year
+    })
+    req.cookies.visitor_id = id
+  }
+  next()
+}
+```
+
+Then use `req.cookies.visitor_id` as the userId for every SignaKit call in that request.
+
+### Browser and React apps
+
+In a browser context the cookie cannot be `httpOnly` — JavaScript needs to read it to pass it to the SDK. A regular cookie is still preferred over `localStorage` because it is available to server-side code on the same domain (for SSR or API routes).
+
+```typescript title="visitor.ts"
+function getVisitorId(): string {
+  const cookieName = 'visitor_id'
+  const existing = document.cookie
+    .split('; ')
+    .find((row) => row.startsWith(`${cookieName}=`))
+    ?.split('=')[1]
+
+  if (existing) return existing
+
+  const id = crypto.randomUUID()
+  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toUTCString()
+  document.cookie = `${cookieName}=${id}; expires=${expires}; path=/; SameSite=Lax`
+  return id
+}
+```
+
+Pass the result to `SignaKitProvider` or `createUserContext` as the userId.
+
+<Callout type="info">
+  If your app uses `localStorage` instead of cookies, be aware that `localStorage` is not shared across subdomains and is cleared when users wipe their browser data. Cookies with a `domain` attribute can span subdomains.
+</Callout>
+
+### Mobile apps (Flutter, React Native)
+
+You do not need to manage storage manually. SignaKit's mobile SDKs generate and persist an anonymous ID automatically when you enable `persistConfig`.
+
+```dart title="main.dart (Flutter)"
+final client = SignaKitClient(
+  sdkKey: 'sk_dev_xxxx',
+  persistConfig: PersistConfig(enabled: true),
+)
+```
+
+```typescript title="App.tsx (React Native)"
+const client = new SignaKitClient({
+  sdkKey: 'sk_dev_xxxx',
+  persistConfig: { enabled: true },
+})
+```
+
+The SDK stores the generated ID in secure storage and reuses it on every app launch.
+
+---
+
+## After login: switching to an authenticated ID
+
+When an anonymous user logs in, switch their userId to the authenticated user's ID. There is no aliasing step — just start passing the real ID.
+
+```typescript title="server.ts"
+// Before login — anonymous visitor
+const userCtx = client.createUserContext(req.cookies.visitor_id, {})
+
+// After login — use the real user ID
+const userCtx = client.createUserContext(session.userId, {
+  plan: session.plan,
+})
+```
+
+The user will be re-bucketed based on their authenticated ID. If both IDs hash to the same variation — great. If not, the user's experience may change at the moment of login.
+
+**If you need continuity** — the same variation before and after login — you have two options:
+
+1. **Start with the authenticated ID.** Before the user logs in, if you know they have an account (e.g., they are on a login page), use their known user ID from the start of the session.
+2. **Pass the anonymous ID as an attribute.** Store the anonymous UUID as an attribute (`anonymousId: visitorUUID`) on the authenticated user context. You can then use it in targeting rules, even if it is not the bucketing key.
+
+<Callout type="info">
+  For most experiments, the re-bucketing at login is acceptable. Users typically log in early in a session, before they have accumulated much exposure data.
+</Callout>
+
+---
+
+## What makes a good user ID
+
+| Property | Why it matters |
+|---|---|
+| **Stable across sessions** | Ensures consistent bucketing. The same user always gets the same variation. |
+| **Unique per user** | Two users sharing an ID would share a variation, distorting experiment results. |
+| **Not guessable** | Sequential integers (1, 2, 3) let a malicious user predict or target another user's ID. Use UUIDs or opaque identifiers for anonymous users. |
+| **Not required to be PII-free** | The userId can be a database ID that references a record containing PII — that is fine. The ID itself does not need to be the email or name. |
+
+<Callout type="info">
+  A userId does not need to be a UUID. Any stable, unique string works. A database primary key like `usr_a1b2c3d4` is a perfectly valid userId.
+</Callout>
+
+---
+
+## Related
+
+- [Targeted Delivery](/docs/flags/concepts/targeted-delivery) — using attributes alongside the userId to target specific segments
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how flag evaluation works end-to-end
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — how the SDK fetches config and evaluates flags locally

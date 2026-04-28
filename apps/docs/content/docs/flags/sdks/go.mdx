@@ -1,0 +1,518 @@
+---
+title: Go
+description: Full API reference for github.com/signakit/flags-golang — server-side feature flags with local evaluation, context.Context propagation, and goroutine-safe concurrent use.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Go SDK
+
+**Module:** `github.com/signakit/flags-golang`  
+**Registry:** pkg.go.dev  
+**Minimum Go version:** 1.22+
+
+The Go SDK fetches your flag configuration from the SignaKit CDN once on startup, then evaluates all flags **locally** on every request — no network call per evaluation. Exposure and conversion events are dispatched asynchronously in background goroutines and never block your request path.
+
+---
+
+## Installation
+
+```bash
+go get github.com/signakit/flags-golang
+```
+
+Set your SDK key as an environment variable:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+---
+
+## Initialization
+
+Create the client **once at program startup** — not inside an HTTP handler. A package-level singleton reuses the fetched config across all requests for the lifetime of the process and ensures in-memory exposure deduplication works correctly.
+
+```go title="internal/signakit/client.go"
+package signakit
+
+import (
+    "context"
+    "log"
+    "os"
+
+    sk "github.com/signakit/flags-golang/signakit"
+)
+
+var Client *sk.Client
+
+func init() {
+    c, err := sk.NewClient(context.Background(), os.Getenv("SIGNAKIT_SDK_KEY"))
+    if err != nil {
+        log.Fatalf("signakit: failed to initialize: %v", err)
+    }
+    Client = c
+}
+```
+
+Then import and use the singleton in your handlers:
+
+```go
+import skinternal "yourmodule/internal/signakit"
+
+func HandleCheckout(w http.ResponseWriter, r *http.Request) {
+    userCtx := skinternal.Client.CreateUserContext(userID, nil)
+    decision := userCtx.Decide("new-checkout")
+    // ...
+}
+```
+
+<Callout type="danger" title="Anti-pattern: client per request">
+
+```go
+// Never do this — re-fetches config on every request; dedup provides no protection
+func HandleCheckout(w http.ResponseWriter, r *http.Request) {
+    c, _ := sk.NewClient(r.Context(), os.Getenv("SIGNAKIT_SDK_KEY"))
+    userCtx := c.CreateUserContext(userID, nil)
+    // ...
+}
+```
+
+Initialize once at startup and pass the singleton via a package variable, dependency injection, or middleware context.
+
+</Callout>
+
+### `NewClient(ctx, sdkKey, opts...)`
+
+```go
+func NewClient(ctx context.Context, sdkKey string, opts ...ClientOption) (*Client, error)
+```
+
+`NewClient` constructs a `Client` and **synchronously fetches** the initial config before returning. It returns an error if the SDK key is malformed or the initial fetch fails.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `ctx` | `context.Context` | Controls the timeout/cancellation of the initial config fetch |
+| `sdkKey` | `string` | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `opts` | `...ClientOption` | Optional functional options (see below) |
+
+#### Functional options
+
+| Option | Default | Description |
+|---|---|---|
+| `WithHTTPClient(c *http.Client)` | 10s timeout | Override the `*http.Client` used for config fetches and event posts |
+| `WithLogger(l *slog.Logger)` | `slog.Default()` | Set a custom structured logger |
+| `WithCDNBaseURL(u string)` | SignaKit CDN | Override the CDN base URL (primarily for tests) |
+| `WithEventsURL(u string)` | SignaKit events API | Override the events ingestion URL (primarily for tests) |
+| `WithSyncEventDispatch()` | async (goroutine) | Make event dispatch synchronous instead of fire-and-forget — useful in tests |
+
+---
+
+## Refreshing the config
+
+`NewClient` fetches the config on startup. To keep the config fresh in a long-running process, call `Refresh` periodically:
+
+```go
+// Refresh every 30 seconds in a background goroutine
+go func() {
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
+    for range ticker.C {
+        if err := skinternal.Client.Refresh(context.Background()); err != nil {
+            log.Printf("signakit: refresh failed: %v", err)
+        }
+    }
+}()
+```
+
+### `Refresh(ctx)`
+
+```go
+func (c *Client) Refresh(ctx context.Context) error
+```
+
+Re-fetches the project config from the CDN. Uses ETag/304 caching — if the config has not changed the CDN responds with `304 Not Modified` and no bytes are transferred. Returns an error on network failure; the previously cached config continues to be used.
+
+---
+
+## Inspecting the cached config
+
+```go
+func (c *Client) Config() *ProjectConfig
+```
+
+Returns the currently cached `*ProjectConfig`, or `nil` if no fetch has succeeded yet. Useful for health checks:
+
+```go
+if skinternal.Client.Config() == nil {
+    http.Error(w, "flags not ready", http.StatusServiceUnavailable)
+    return
+}
+```
+
+---
+
+## Creating a user context
+
+A `UserContext` represents a specific user. Create one **per request** with the user's ID and any attributes you want to use in targeting rules.
+
+```go
+userCtx := client.CreateUserContext("user-123", sk.UserAttributes{
+    "plan":       "pro",
+    "country":    "US",
+    "betaTester": true,
+})
+```
+
+### `CreateUserContext(userID, attrs)`
+
+```go
+func (c *Client) CreateUserContext(userID string, attrs UserAttributes) *UserContext
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `userID` | `string` | Unique, stable identifier for the user. Used for deterministic bucketing — the same ID always produces the same variation. |
+| `attrs` | `UserAttributes` | Key-value pairs matched against your audience targeting rules. Pass `nil` if none are needed. `UserAttributes` is `map[string]any`. |
+
+<Callout type="info">
+
+**`$userAgent` attribute** — pass the request's `User-Agent` header as `$userAgent` to enable bot detection. Detected bots receive the `off` variation and do not fire exposure events.
+
+```go
+userCtx := client.CreateUserContext(userID, sk.UserAttributes{
+    "$userAgent": r.Header.Get("User-Agent"),
+    "plan":       "pro",
+})
+```
+
+The `$userAgent` key is consumed by the bot detection logic and stripped before targeting — it never reaches your audience rules.
+
+</Callout>
+
+<Callout type="warning" title="UserContext is not goroutine-safe">
+Create a new `UserContext` per request. Do not share a single `UserContext` across goroutines. The `Client` itself is safe for concurrent use.
+</Callout>
+
+---
+
+## Evaluating a single flag
+
+```go
+decision := userCtx.Decide("new-checkout")
+
+if decision != nil && decision.Enabled {
+    // Show the new checkout experience
+    fmt.Println(decision.VariationKey) // e.g. "treatment"
+}
+```
+
+### `Decide(flagKey)`
+
+```go
+func (u *UserContext) Decide(flagKey string) *Decision
+```
+
+Returns a `*Decision`, or `nil` if the flag does not exist, is archived, or the user does not match any targeting rule.
+
+**Always nil-check the return value.** A `nil` result means the flag was not found or the user was not targeted — treat it as the disabled/control state.
+
+```go
+decision := userCtx.Decide("my-flag")
+enabled := decision != nil && decision.Enabled
+```
+
+As a side effect, an `$exposure` event is dispatched fire-and-forget (in a goroutine) unless the matched rule is of type `targeted`. Targeted rollout rules do not generate exposure events.
+
+---
+
+## Evaluating all flags at once
+
+```go
+decisions := userCtx.DecideAll()
+
+if d, ok := decisions["new-checkout"]; ok && d.Enabled {
+    // ...
+}
+if d, ok := decisions["redesigned-nav"]; ok && d.Enabled {
+    // ...
+}
+```
+
+### `DecideAll()`
+
+```go
+func (u *UserContext) DecideAll() Decisions
+```
+
+Returns a `Decisions` map (`map[string]Decision`) keyed by flag key. Only flags where the user matches a targeting rule are included. Archived flags are omitted entirely.
+
+Exposure events are dispatched for each non-targeted decision, identical to calling `Decide` on each flag individually.
+
+<Callout type="warning" title="Use DecideAll() selectively">
+Calling `DecideAll()` evaluates every active flag in your project and fires an `$exposure` event for each one the user is bucketed into. In middleware or interceptors that run on every request, only evaluate the specific flags your route actually needs. Using `DecideAll()` in blanket middleware is one of the most common causes of unexpected event volume spikes.
+</Callout>
+
+---
+
+## Tracking events
+
+Track a conversion or goal event that you've defined in the SignaKit dashboard.
+
+```go
+// Basic event
+userCtx.TrackEvent("purchase_completed")
+
+// With a numeric value (e.g. revenue)
+userCtx.TrackEvent("purchase_completed", sk.WithValue(99.99))
+
+// With value and metadata
+userCtx.TrackEvent("purchase_completed",
+    sk.WithValue(99.99),
+    sk.WithMetadata(map[string]any{
+        "plan":     "pro",
+        "currency": "USD",
+    }),
+)
+```
+
+### `TrackEvent(eventKey, opts...)`
+
+```go
+func (u *UserContext) TrackEvent(eventKey string, opts ...EventOption)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventKey` | `string` | The event name, matching an event definition in your project |
+| `opts` | `...EventOption` | Optional functional options (see below) |
+
+**Returns:** nothing — fire and forget. The event is dispatched in a background goroutine. Errors are logged via the configured `slog.Logger` but never returned to the caller.
+
+For bots (detected via `$userAgent`), `TrackEvent` is a no-op.
+
+#### Event options
+
+| Option | Description |
+|---|---|
+| `WithValue(v float64)` | Attach a numeric value to the event (e.g. revenue, duration) |
+| `WithMetadata(m map[string]any)` | Attach arbitrary metadata. Dropped silently if serialized size exceeds 5,000 bytes |
+
+---
+
+## The `Decision` struct
+
+```go
+type Decision struct {
+    FlagKey      string         // The flag key evaluated
+    VariationKey string         // Assigned variation: "control", "treatment", or custom key
+    Enabled      bool           // Whether the flag is on for this user
+    RuleKey      *string        // The targeting rule that matched (nil if default allocation)
+    RuleType     *RuleType      // Rule type: "ab-test", "multi-armed-bandit", or "targeted" (nil if default)
+    Variables    map[string]any // Variable overrides defined on the matched variation
+}
+
+// Decisions is the return type of DecideAll()
+type Decisions map[string]Decision
+```
+
+`RuleKey` and `RuleType` are pointer types — they are `nil` when the decision came from the flag's default allocation rather than a named rule.
+
+---
+
+## Types reference
+
+### `UserAttributes`
+
+```go
+type UserAttributes map[string]any
+```
+
+Attribute values may be `string`, `float64`, `bool`, `[]string`, or `[]any`. The special key `"$userAgent"` is consumed by bot detection and stripped before targeting rules are evaluated.
+
+**Sanitization limits applied before event dispatch:**
+
+| Limit | Value |
+|---|---|
+| Max attribute count | 50 |
+| Max attribute key length | 100 characters |
+| Max string attribute value length | 1,000 characters |
+| Max `[]string` slice length | 100 elements |
+
+### `RuleType`
+
+```go
+type RuleType string
+
+const (
+    RuleTypeABTest           RuleType = "ab-test"
+    RuleTypeMultiArmedBandit RuleType = "multi-armed-bandit"
+    RuleTypeTargeted         RuleType = "targeted"
+)
+```
+
+### `Environment`
+
+```go
+type Environment string
+
+const (
+    EnvironmentDevelopment Environment = "development"
+    EnvironmentProduction  Environment = "production"
+)
+```
+
+### `ProjectConfig`
+
+```go
+type ProjectConfig struct {
+    ProjectID      string
+    EnvironmentKey Environment
+    SDKKey         string
+    Version        int
+    Flags          []ConfigFlag
+    GeneratedAt    string
+}
+```
+
+Returned by `client.Config()`. Useful for health checks and introspection — not typically needed in application code.
+
+---
+
+## Targeted delivery
+
+When a flag is configured as a targeted rollout (not an experiment), `Decide` returns `Enabled: true` for users who match the audience rule. No primary metric is needed and no `$exposure` event is fired.
+
+```go
+betaAccess := userCtx.Decide("beta-dashboard")
+
+if betaAccess != nil && betaAccess.Enabled {
+    http.Redirect(w, r, "/dashboard/beta", http.StatusFound)
+    return
+}
+```
+
+Bucketing is deterministic — the same `userID` always produces the same outcome for the same flag configuration.
+
+---
+
+## A/B testing
+
+When a flag runs as an experiment, `Decide` returns the assigned variation. The SDK automatically dispatches an `$exposure` event the first time a user is evaluated for that flag within the `UserContext`'s lifetime.
+
+```go
+checkout := userCtx.Decide("checkout-redesign")
+
+var handler http.Handler
+switch {
+case checkout == nil || checkout.VariationKey == "control":
+    handler = legacyCheckoutHandler
+case checkout.VariationKey == "treatment-a":
+    handler = checkoutV2Handler
+case checkout.VariationKey == "treatment-b":
+    handler = checkoutV3Handler
+default:
+    handler = legacyCheckoutHandler
+}
+handler.ServeHTTP(w, r)
+```
+
+Track your primary metric when the user converts:
+
+```go
+// After the user completes the purchase
+userCtx.TrackEvent("purchase_completed", sk.WithValue(order.Total))
+```
+
+---
+
+## Error handling
+
+`NewClient` returns an error on malformed SDK keys or failed initial fetches — handle it at startup. After successful initialization, `Decide` and `DecideAll` never return errors; they return `nil` / an empty map when no config is available, which your code should treat as the default/off state.
+
+```go
+c, err := sk.NewClient(ctx, os.Getenv("SIGNAKIT_SDK_KEY"))
+if err != nil {
+    // Fail fast at startup — no point running without flag config
+    log.Fatalf("signakit: %v", err)
+}
+
+// Later in a handler — always safe; Decide returns nil gracefully
+decision := userCtx.Decide("my-flag")
+enabled := decision != nil && decision.Enabled
+```
+
+`Refresh` returns an error on network failure but does not clear the previously cached config — the client keeps serving the last good config until a successful refresh.
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `NewClient` inside an HTTP handler | Synchronous config fetch on every request; per-request dedup provides no protection | Initialize once at startup; inject the `*Client` singleton |
+| Not handling the error from `NewClient` | The client may be `nil`, causing a nil-pointer panic on first use | Check `err != nil` at startup and fail fast |
+| Sharing a `UserContext` across goroutines | `UserContext` is not goroutine-safe; concurrent writes to `cachedDecisions` will race | Create a fresh `UserContext` per request |
+| `DecideAll()` in middleware that runs on every route | Evaluates every flag on every request; N flags × all traffic = high event volume | Use `Decide("specific-flag")` in middleware |
+| Evaluating a flag inside a per-item loop | One exposure event fires per iteration, not per user | Evaluate once per `UserContext`, apply the result to all items |
+| Not calling `Refresh` in long-running processes | Config goes stale; flag changes in the dashboard never take effect | Run a periodic `Refresh` loop (e.g. every 30s) |
+
+---
+
+## Gin example
+
+```go
+package main
+
+import (
+    "net/http"
+    "os"
+
+    "github.com/gin-gonic/gin"
+    sk "github.com/signakit/flags-golang/signakit"
+)
+
+var flagClient *sk.Client
+
+func main() {
+    var err error
+    flagClient, err = sk.NewClient(
+        context.Background(),
+        os.Getenv("SIGNAKIT_SDK_KEY"),
+    )
+    if err != nil {
+        panic(err)
+    }
+
+    r := gin.Default()
+    r.GET("/checkout", checkoutHandler)
+    r.Run()
+}
+
+func checkoutHandler(c *gin.Context) {
+    userID := c.GetString("userID") // set by your auth middleware
+
+    userCtx := flagClient.CreateUserContext(userID, sk.UserAttributes{
+        "$userAgent": c.Request.Header.Get("User-Agent"),
+        "plan":       c.GetString("plan"),
+    })
+
+    decision := userCtx.Decide("checkout-redesign")
+    if decision != nil && decision.VariationKey == "treatment" {
+        c.JSON(http.StatusOK, gin.H{"version": "v2"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"version": "v1"})
+}
+```
+
+---
+
+## Related
+
+- [Quickstart →](/docs/flags/quickstart)
+- [Gin guide →](/docs/flags/guides/gin)
+- [Echo guide →](/docs/flags/guides/echo)
+- [Chi guide →](/docs/flags/guides/chi)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

@@ -1,0 +1,388 @@
+---
+title: Express
+description: Integrate SignaKit feature flags into an Express.js application — module-level singleton, visitor middleware, route-level evaluation, A/B testing, and conversion tracking.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Express
+
+**SDK:** `@signakit/flags-node`  
+**Express version:** 4+
+
+The recommended pattern for Express is a **module-level singleton** initialized before the server starts, a lightweight middleware that resolves a `userId` on every request, and flag evaluation inside individual route handlers. All flag evaluation is local — no network round-trip per request.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK and cookie-parser
+
+```npm
+npm install @signakit/flags-node cookie-parser
+```
+
+If you are using TypeScript, also install the cookie-parser types:
+
+```npm
+npm install -D @types/cookie-parser
+```
+
+Add your SDK key to your environment:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create the module-level singleton
+
+Create the client once at module level and export it. This file is evaluated once when the process starts — every request in that process shares the same fetched config and the same in-memory exposure dedup table.
+
+```ts title="src/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+
+if (!client) {
+  throw new Error('Failed to create SignaKit client — check your SIGNAKIT_SDK_KEY')
+}
+
+export { client }
+```
+
+</Step>
+
+<Step>
+
+### Await `onReady()` before `app.listen()`
+
+Call `onReady()` in your startup sequence so the config is fetched before the first request arrives. If config fetch fails, `decide()` returns `null` for every flag — your routes should already handle that as the safe default.
+
+```ts title="src/server.ts"
+import express from 'express'
+import cookieParser from 'cookie-parser'
+import { client } from './signakit'
+import { visitorMiddleware } from './middleware/visitor'
+import { checkoutRouter } from './routes/checkout'
+
+const app = express()
+
+app.use(express.json())
+app.use(cookieParser())
+app.use(visitorMiddleware)
+
+app.use('/checkout', checkoutRouter)
+
+async function start() {
+  const { success, reason } = await client.onReady()
+
+  if (!success) {
+    console.warn('[SignaKit] Config fetch failed, flags will return defaults:', reason)
+  }
+
+  app.listen(3000, () => {
+    console.log('Server listening on http://localhost:3000')
+  })
+}
+
+start()
+```
+
+</Step>
+
+<Step>
+
+### Add visitor middleware
+
+This middleware resolves a stable user ID on every request and attaches it to `req`. Authenticated users get their real user ID; anonymous visitors get a persistent `visitor_id` cookie generated on first visit.
+
+```ts title="src/middleware/visitor.ts"
+import type { Request, Response, NextFunction } from 'express'
+import { randomUUID } from 'crypto'
+
+declare global {
+  namespace Express {
+    interface Request {
+      userId: string
+    }
+  }
+}
+
+export function visitorMiddleware(req: Request, res: Response, next: NextFunction) {
+  // Prefer an authenticated user ID from your session/JWT if available
+  // e.g. const userId = req.session?.userId
+  const userId = req.cookies['visitor_id'] as string | undefined
+
+  if (userId) {
+    req.userId = userId
+  } else {
+    const newId = randomUUID()
+    res.cookie('visitor_id', newId, {
+      httpOnly: true,
+      sameSite: 'lax',
+      // Set a long max-age so the ID persists across sessions
+      maxAge: 60 * 60 * 24 * 365 * 1000, // 1 year
+    })
+    req.userId = newId
+  }
+
+  next()
+}
+```
+
+<Callout type="info" title="Authenticated users">
+If you have an auth session, use the authenticated user ID instead of the cookie. A stable ID ensures the same user always sees the same variation:
+
+```ts
+const userId = req.session?.userId ?? req.cookies['visitor_id']
+```
+
+</Callout>
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating a flag in a route handler
+
+Evaluate flags inside the route handler that needs them. Create a `UserContext` from `req.userId`, call `decide()`, then branch on the result.
+
+```ts title="src/routes/checkout.ts"
+import { Router } from 'express'
+import { client } from '../signakit'
+
+export const checkoutRouter = Router()
+
+checkoutRouter.get('/', (req, res) => {
+  const userCtx = client.createUserContext(req.userId, {
+    $userAgent: req.headers['user-agent'],
+  })
+
+  const checkout = userCtx?.decide('checkout-redesign')
+
+  if (checkout?.variationKey === 'treatment') {
+    return res.render('checkout-v2')
+  }
+
+  return res.render('checkout-legacy')
+})
+```
+
+<Callout type="warning" title="createUserContext returns null if the client is not ready">
+`createUserContext()` returns `null` if `onReady()` has not resolved yet — always null-check the return value or use optional chaining (`userCtx?.decide(...)`). When `null`, `decide()` is never called and you fall through to your default branch, which is the correct safe-default behavior.
+</Callout>
+
+---
+
+## A/B testing
+
+For experiments, branch on `variationKey`. The SDK fires an `$exposure` event automatically the first time `decide()` is called for a user-flag pair within the instance's lifetime.
+
+```ts title="src/routes/pricing.ts"
+import { Router } from 'express'
+import { client } from '../signakit'
+
+export const pricingRouter = Router()
+
+pricingRouter.get('/', (req, res) => {
+  const userCtx = client.createUserContext(req.userId, {
+    $userAgent: req.headers['user-agent'],
+    plan: req.session?.plan ?? 'free',
+  })
+
+  const pricing = userCtx?.decide('pricing-page-experiment')
+
+  switch (pricing?.variationKey) {
+    case 'annual-first':
+      return res.render('pricing-annual-first')
+    case 'monthly-first':
+      return res.render('pricing-monthly-first')
+    default:
+      // null — flag off, user not targeted, or client not ready
+      return res.render('pricing-control')
+  }
+})
+```
+
+---
+
+## Tracking conversion events
+
+Track a goal after the user completes an action. Call `decide()` first so the SDK has a cached decision to attribute the event to the correct experiment variation. Both calls use the same `userCtx` instance.
+
+```ts title="src/routes/checkout.ts"
+import { Router } from 'express'
+import { client } from '../signakit'
+
+export const checkoutRouter = Router()
+
+// Evaluate flag and render checkout
+checkoutRouter.get('/', (req, res) => {
+  const userCtx = client.createUserContext(req.userId)
+  const checkout = userCtx?.decide('checkout-redesign')
+
+  res.locals.userCtx = userCtx // pass context to next handler if needed
+
+  return checkout?.variationKey === 'treatment'
+    ? res.render('checkout-v2')
+    : res.render('checkout-legacy')
+})
+
+// Track conversion when order is placed
+checkoutRouter.post('/complete', async (req, res) => {
+  const { orderId, total } = req.body
+
+  const userCtx = client.createUserContext(req.userId)
+
+  // decide() first — caches the variation for attribution
+  userCtx?.decide('checkout-redesign')
+
+  // trackEvent attributes the conversion to the correct variation
+  await userCtx?.trackEvent('purchase_completed', { value: total })
+
+  return res.json({ success: true, orderId })
+})
+```
+
+<Callout type="info" title="Event attribution requires decide() before trackEvent()">
+The SDK attaches experiment variation decisions to outgoing events using an in-memory cache on the `UserContext` instance. To attribute a conversion correctly, call `decide()` on the same `userCtx` before calling `trackEvent()`. If you create a fresh `UserContext` only for tracking, the event is still recorded but carries no variation context.
+</Callout>
+
+---
+
+## Feature flag middleware (route gating)
+
+Use Express middleware to block or redirect a route for users who are not in a flag's target audience. This is useful for beta access, maintenance pages, or phased rollouts.
+
+```ts title="src/middleware/flags.ts"
+import type { Request, Response, NextFunction } from 'express'
+import { client } from '../signakit'
+
+export function requireFlag(flagKey: string, redirectTo = '/') {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const userCtx = client.createUserContext(req.userId, {
+      $userAgent: req.headers['user-agent'],
+    })
+
+    const decision = userCtx?.decide(flagKey)
+
+    if (!decision?.enabled) {
+      return res.redirect(redirectTo)
+    }
+
+    next()
+  }
+}
+```
+
+Apply it to any router or individual route:
+
+```ts title="src/routes/beta.ts"
+import { Router } from 'express'
+import { requireFlag } from '../middleware/flags'
+
+export const betaRouter = Router()
+
+// Only users targeted by 'beta-dashboard' can access these routes
+betaRouter.use(requireFlag('beta-dashboard', '/dashboard'))
+
+betaRouter.get('/', (req, res) => {
+  res.render('beta-dashboard')
+})
+```
+
+<Callout type="warning" title="Keep per-route middleware focused on one flag">
+Each `requireFlag` call evaluates exactly one flag and fires at most one `$exposure` event for the matched user. Avoid calling `decideAll()` in middleware — it evaluates every flag in the project and fires an exposure for each one, which multiplies your event volume by the number of active flags.
+</Callout>
+
+---
+
+## Passing attributes for targeting
+
+Pass attributes when creating the user context to match audience rules defined in your SignaKit dashboard:
+
+```ts title="src/routes/dashboard.ts"
+import { Router } from 'express'
+import { client } from '../signakit'
+
+export const dashboardRouter = Router()
+
+dashboardRouter.get('/', (req, res) => {
+  const userCtx = client.createUserContext(req.userId, {
+    $userAgent: req.headers['user-agent'],
+    plan: req.session?.plan ?? 'free',
+    country: req.headers['cloudfront-viewer-country'] as string ?? 'unknown',
+    betaTester: req.session?.betaTester ?? false,
+  })
+
+  const newDashboard = userCtx?.decide('new-dashboard-layout')
+
+  return newDashboard?.enabled
+    ? res.render('dashboard-v2')
+    : res.render('dashboard-v1')
+})
+```
+
+---
+
+## TypeScript types
+
+```ts
+import type {
+  SignaKitClient,
+  SignaKitUserContext,
+  SignaKitDecision,
+  SignaKitDecisions,
+  TrackEventOptions,
+} from '@signakit/flags-node'
+
+// Decision shape
+type SignaKitDecision = {
+  flagKey: string
+  enabled: boolean
+  variationKey: string
+  ruleKey: string | null
+  ruleType: 'ab-test' | 'multi-armed-bandit' | 'targeted' | null
+  variables: Record<string, string | number | boolean | Record<string, unknown>>
+}
+
+// trackEvent options
+type TrackEventOptions = {
+  value?: number
+  metadata?: Record<string, unknown>
+}
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside a route handler | Re-fetches config on every request; dedup is per-instance so each request fires a fresh exposure | Create the client once in `src/signakit.ts` and import it |
+| Not awaiting `onReady()` before `app.listen()` | `createUserContext()` returns `null` for the first few requests while config is loading | `await client.onReady()` in your startup function before the server starts listening |
+| `decideAll()` in middleware applied to all routes | Evaluates every flag × all traffic; N flags = N exposures per request | Use `decide('specific-flag')` and apply middleware only to routes that need the flag |
+| Creating a new `UserContext` only for `trackEvent` | Event carries no variation context — cannot be attributed to an experiment | Call `decide()` first on the same `userCtx`, then `trackEvent()` |
+| Not null-checking `createUserContext()` | TypeScript error or runtime crash if the client has not resolved `onReady()` yet | Use optional chaining: `userCtx?.decide(...)` or guard with `if (!userCtx) return` |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/docs/flags/sdks/node)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

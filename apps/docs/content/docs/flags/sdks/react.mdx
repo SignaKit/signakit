@@ -1,0 +1,216 @@
+---
+title: React
+description: Full API reference for @signakit/flags-react — SignaKitProvider, useFlag hook, and FlagGate component for client-side feature flags in React applications.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# React SDK
+
+**Package:** `@signakit/flags-react`
+**Peer dependency:** `@signakit/flags-browser`
+**Registry:** npm
+**Environments:** React 18+, browser
+
+A thin wrapper around `@signakit/flags-browser` that provides a context provider, a `useFlag` hook, and a declarative `FlagGate` component. Handles initialization, loading state, and makes flag decisions available anywhere in the component tree.
+
+<Callout type="info">
+**Next.js App Router?** Evaluate flags in server components using `@signakit/flags-node` — no React SDK needed. See the [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+</Callout>
+
+---
+
+## Installation
+
+```npm
+npm install @signakit/flags-react @signakit/flags-browser
+```
+
+---
+
+## `SignaKitProvider`
+
+Wrap your application root with `SignaKitProvider`. It initializes the browser SDK, fetches the config, and makes all flag decisions available via hooks and `FlagGate`.
+
+```tsx title="main.tsx"
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { SignaKitProvider } from '@signakit/flags-react'
+import App from './App'
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <SignaKitProvider
+      sdkKey="sk_prod_yourOrgId_yourProjectId_random"
+      userId="user-123"
+      attributes={{ plan: 'pro', country: 'US' }}
+      loadingFallback={<div>Loading…</div>}
+    >
+      <App />
+    </SignaKitProvider>
+  </StrictMode>
+)
+```
+
+### Props
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `sdkKey` | `string` | ✓ | Your SignaKit browser SDK key |
+| `userId` | `string` | ✓ | Stable unique identifier for the current user. Changes trigger re-evaluation of all flags. |
+| `attributes` | `Record<string, string \| number \| boolean>` | — | User attributes matched against targeting rules |
+| `loadingFallback` | `ReactNode` | — | Rendered while the config is fetching. If omitted, children render immediately with `loading: true` from `useFlag`. |
+| `timeout` | `number` | — | Config fetch timeout in ms (default: `5000`) |
+| `onError` | `(reason: string) => void` | — | Called when config fetch fails after all retries |
+
+<Callout type="warning" title="Memoize attributes to avoid unnecessary re-evaluation">
+```tsx
+// ❌ New object on every render → re-evaluates all flags
+<SignaKitProvider attributes={{ plan: user.plan }}>
+
+// ✓ Stable reference
+const attributes = useMemo(() => ({ plan: user.plan }), [user.plan])
+<SignaKitProvider attributes={attributes}>
+```
+</Callout>
+
+---
+
+## `useFlag(flagKey)`
+
+Evaluates a single flag for the current user.
+
+```tsx
+import { useFlag } from '@signakit/flags-react'
+
+function CheckoutButton() {
+  const { enabled, variationKey, loading } = useFlag('new-checkout')
+
+  if (loading) return <Skeleton />
+
+  return enabled ? <NewCheckoutButton /> : <LegacyCheckoutButton />
+}
+```
+
+### Return value
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | `boolean` | Whether the flag is on. `false` while loading. |
+| `variationKey` | `string \| null` | Assigned variation key. `null` while loading or flag off/not found. |
+| `ruleKey` | `string \| null` | Matched rule key. |
+| `loading` | `boolean` | `true` until the Provider finishes fetching config. Always `false` when `loadingFallback` is set on the Provider. |
+
+---
+
+## `FlagGate`
+
+Declarative show/hide based on a flag.
+
+```tsx
+import { FlagGate } from '@signakit/flags-react'
+
+function FeaturePage() {
+  return (
+    <>
+      {/* Show when flag is enabled */}
+      <FlagGate flag="new-sidebar">
+        <NewSidebar />
+      </FlagGate>
+
+      {/* Show specific variation, fallback for others */}
+      <FlagGate flag="checkout-redesign" variation="treatment" fallback={<LegacyCheckout />}>
+        <NewCheckout />
+      </FlagGate>
+    </>
+  )
+}
+```
+
+### Props
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `flag` | `string` | ✓ | Flag key to evaluate |
+| `variation` | `string` | — | If provided, children only render when the user is in this specific variation |
+| `fallback` | `ReactNode` | — | Rendered when the flag is off, user doesn't match, or variation doesn't match |
+
+---
+
+## `useFlagAll()`
+
+Returns all flag decisions for the current user.
+
+```tsx
+import { useFlagAll } from '@signakit/flags-react'
+
+function Dashboard() {
+  const { decisions, loading } = useFlagAll()
+
+  if (loading) return <Skeleton />
+
+  return (
+    <>
+      {decisions['new-sidebar']?.enabled && <NewSidebar />}
+      {decisions['beta-analytics']?.enabled && <BetaAnalytics />}
+    </>
+  )
+}
+```
+
+<Callout type="warning">
+`useFlagAll()` fires an `$exposure` event for every flag the user is bucketed into. Use `useFlag()` for single flags.
+</Callout>
+
+---
+
+## `useTrackEvent()`
+
+Returns a `track(eventName, properties?)` function bound to the current user context.
+
+```tsx
+import { useTrackEvent } from '@signakit/flags-react'
+
+function PurchaseButton({ amount }: { amount: number }) {
+  const track = useTrackEvent()
+
+  return (
+    <button onClick={() => track('purchase_completed', { value: amount })}>
+      Buy now
+    </button>
+  )
+}
+```
+
+Fire and forget — never throws.
+
+---
+
+## SSR and hydration
+
+The React SDK is **client-only**. In Next.js App Router, mark files using it with `'use client'`.
+
+To avoid hydration mismatches when rendering flag-gated content:
+1. **Recommended:** Evaluate in a server component, pass as a prop — no Provider needed.
+2. Render flag-gated content only after `loading: false` from `useFlag()`.
+3. Set `loadingFallback` on the Provider and wrap with a `Suspense` boundary.
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Calling `decide()` directly on the browser client in a component | Bypasses Provider dedup and loading state | Use `useFlag()` |
+| Inline `attributes` object on the Provider | New object every render → re-evaluates all flags | Memoize with `useMemo` |
+| Using the React SDK in a Next.js server component | Hooks and browser APIs can't run server-side | Use `@signakit/flags-node` in server components |
+| Rendering flag-gated content before `loading: false` | Flashes wrong variant during config fetch | Check `loading` or use `loadingFallback` |
+
+---
+
+## Related
+
+- [Browser SDK →](/docs/flags/sdks/browser)
+- [React SPA guide →](/docs/flags/guides/react-spa)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)

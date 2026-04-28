@@ -1,0 +1,485 @@
+---
+title: Symfony
+description: Integrate SignaKit feature flags into a Symfony application — register the PHP SDK as a service, inject it into controllers, evaluate flags in Twig templates, and track conversions.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Symfony
+
+**SDK:** `signakit/flags-php`  
+**Symfony version:** 6.x / 7.x  
+**PHP version:** 8.1+
+
+The `signakit/flags-php` package is framework-agnostic, but Symfony's service container makes it straightforward to register `SignaKitClient` as a shared singleton, inject it via constructor autowiring, and expose flag checks to Twig templates through a custom extension — all without a dedicated bundle.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```bash
+composer require signakit/flags-php
+```
+
+Guzzle is recommended for better HTTP handling. If it is already a project dependency, the SDK will use it automatically. Otherwise it falls back to cURL with no extra dependencies.
+
+```bash
+composer require guzzlehttp/guzzle
+```
+
+</Step>
+
+<Step>
+
+### Add the SDK key to your environment
+
+```bash title=".env"
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+Commit `.env` to version control with the placeholder value shown above. Store the real key in `.env.local` (not committed) or in your hosting platform's secret management.
+
+</Step>
+
+<Step>
+
+### Register `SignaKitClient` as a service
+
+Symfony's container does not know how to construct `SignaKitClient` automatically because its constructor takes a plain string `$sdkKey`. Bind the environment variable to that argument and tag it for initialization.
+
+```yaml title="config/services.yaml"
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    # ... your existing service definitions ...
+
+    SignaKit\FlagsPhp\SignaKitClient:
+        arguments:
+            $sdkKey: '%env(SIGNAKIT_SDK_KEY)%'
+```
+
+The class is registered as a shared service by default, so the container returns the same instance for every injection — exactly the singleton behavior the SDK requires.
+
+</Step>
+
+<Step>
+
+### Initialize the client at boot
+
+`initialize()` fetches the flag configuration from the SignaKit CDN. It must be called once before any flag evaluation. The right place in Symfony is a kernel event subscriber that fires early in the request lifecycle.
+
+```php title="src/EventSubscriber/SignaKitInitSubscriber.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\EventSubscriber;
+
+use SignaKit\FlagsPhp\SignaKitClient;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpKernel\Event\RequestEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+
+final class SignaKitInitSubscriber implements EventSubscriberInterface
+{
+    private bool $initialized = false;
+
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+    ) {}
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            KernelEvents::REQUEST => ['onKernelRequest', 256], // high priority, runs early
+        ];
+    }
+
+    public function onKernelRequest(RequestEvent $event): void
+    {
+        if (!$event->isMainRequest() || $this->initialized) {
+            return;
+        }
+
+        try {
+            $this->signaKit->initialize();
+            $this->initialized = true;
+        } catch (\RuntimeException $e) {
+            // Config fetch failed — log and continue; decide() calls will return null
+            // and the application will behave as if all flags are off.
+            error_log('SignaKit failed to initialize: ' . $e->getMessage());
+        }
+    }
+}
+```
+
+<Callout type="info">
+Because PHP-FPM starts a fresh process per request, `$this->initialized` resets on every request. The guard prevents double-initialization within the same request (e.g. if sub-requests are dispatched). In persistent runtimes such as FrankenPHP or Swoole, inject the subscriber as a singleton and the guard will correctly skip subsequent requests.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Assign a stable visitor ID for anonymous users
+
+SignaKit buckets users by `userId`. For authenticated users, use your session's user ID. For anonymous visitors, read a stable cookie and generate one if it does not exist yet.
+
+The best place to set the cookie is the same `KernelEvents::REQUEST` subscriber (or a separate one), and the cookie value should be written on `KernelEvents::RESPONSE` so it is attached to the outgoing response.
+
+```php title="src/EventSubscriber/VisitorIdSubscriber.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\EventSubscriber;
+
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpFoundation\Cookie;
+use Symfony\Component\HttpKernel\Event\RequestEvent;
+use Symfony\Component\HttpKernel\Event\ResponseEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+use Symfony\Component\Uid\Uuid;
+
+final class VisitorIdSubscriber implements EventSubscriberInterface
+{
+    private ?string $newVisitorId = null;
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            KernelEvents::REQUEST  => ['onKernelRequest', 255],
+            KernelEvents::RESPONSE => ['onKernelResponse', 0],
+        ];
+    }
+
+    public function onKernelRequest(RequestEvent $event): void
+    {
+        if (!$event->isMainRequest()) {
+            return;
+        }
+
+        $request   = $event->getRequest();
+        $visitorId = $request->cookies->get('visitor_id');
+
+        if ($visitorId === null) {
+            $this->newVisitorId = (string) Uuid::v4();
+            $request->cookies->set('visitor_id', $this->newVisitorId);
+        }
+    }
+
+    public function onKernelResponse(ResponseEvent $event): void
+    {
+        if (!$event->isMainRequest() || $this->newVisitorId === null) {
+            return;
+        }
+
+        $event->getResponse()->headers->setCookie(
+            Cookie::create('visitor_id')
+                ->withValue($this->newVisitorId)
+                ->withExpires(new \DateTimeImmutable('+1 year'))
+                ->withSameSite('Lax')
+                ->withHttpOnly(false), // readable by JS if needed; set true if not
+        );
+    }
+}
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating flags in a controller
+
+Inject `SignaKitClient` via constructor autowiring. Symfony resolves it automatically because the class is registered in `services.yaml`.
+
+```php title="src/Controller/CheckoutController.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use SignaKit\FlagsPhp\SignaKitClient;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Attribute\Route;
+
+final class CheckoutController extends AbstractController
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+    ) {}
+
+    #[Route('/checkout', name: 'checkout')]
+    public function index(Request $request): Response
+    {
+        $user      = $this->getUser();
+        $userId    = $user?->getUserIdentifier() ?? $request->cookies->get('visitor_id', 'anonymous');
+
+        $ctx = $this->signaKit->createUserContext(
+            userId: $userId,
+            attributes: [
+                'plan'        => $user?->getPlan() ?? 'free',
+                '$userAgent'  => $request->headers->get('User-Agent', ''),
+            ],
+        );
+
+        $checkout = $ctx->decide('checkout-redesign');
+
+        return $this->render('checkout/index.html.twig', [
+            'useNewCheckout' => $checkout?->enabled ?? false,
+            'variationKey'   => $checkout?->variationKey ?? 'control',
+        ]);
+    }
+}
+```
+
+<Callout type="info" title="Passing $userAgent for bot detection">
+Including `'$userAgent'` in attributes enables automatic bot detection. Bots receive the `off` variation and do not fire exposure events, keeping your experiment data clean.
+</Callout>
+
+---
+
+## Multi-variation A/B tests
+
+When a flag has more than two variations, match on `variationKey` to select the right experience.
+
+```php title="src/Controller/HomepageController.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use SignaKit\FlagsPhp\SignaKitClient;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Attribute\Route;
+
+final class HomepageController extends AbstractController
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+    ) {}
+
+    #[Route('/', name: 'homepage')]
+    public function index(Request $request): Response
+    {
+        $userId = $request->cookies->get('visitor_id', 'anonymous');
+        $ctx    = $this->signaKit->createUserContext($userId);
+
+        $hero = $ctx->decide('homepage-hero');
+
+        $template = match ($hero?->variationKey) {
+            'treatment-a' => 'homepage/hero-a.html.twig',
+            'treatment-b' => 'homepage/hero-b.html.twig',
+            default        => 'homepage/hero-control.html.twig',
+        };
+
+        return $this->render($template);
+    }
+}
+```
+
+---
+
+## Tracking conversion events
+
+Call `trackEvent()` after the user completes a goal. Pass an optional numeric value for revenue or score metrics.
+
+```php title="src/Controller/OrderController.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use App\Repository\OrderRepository;
+use SignaKit\FlagsPhp\SignaKitClient;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Attribute\Route;
+
+final class OrderController extends AbstractController
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+        private readonly OrderRepository $orders,
+    ) {}
+
+    #[Route('/order/{id}/confirm', name: 'order_confirm', methods: ['POST'])]
+    public function confirm(int $id, Request $request): Response
+    {
+        $order  = $this->orders->find($id);
+        $userId = $this->getUser()?->getUserIdentifier()
+            ?? $request->cookies->get('visitor_id', 'anonymous');
+
+        $ctx = $this->signaKit->createUserContext($userId);
+        $ctx->trackEvent('purchase_completed', (float) $order->getTotal());
+
+        return $this->redirectToRoute('order_success', ['id' => $id]);
+    }
+}
+```
+
+`trackEvent()` is fire-and-forget — it never throws. Any network error is written to `error_log()` and execution continues normally.
+
+---
+
+## Twig extension — flag checks in templates
+
+Inject `SignaKitClient` into a Twig extension so templates can evaluate flags without threading the client through every controller's render call.
+
+```php title="src/Twig/FlagExtension.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\Twig;
+
+use SignaKit\FlagsPhp\SignaKitClient;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Twig\Extension\AbstractExtension;
+use Twig\TwigFunction;
+
+final class FlagExtension extends AbstractExtension
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+        private readonly RequestStack $requestStack,
+    ) {}
+
+    public function getFunctions(): array
+    {
+        return [
+            new TwigFunction('flag_enabled', $this->isFlagEnabled(...)),
+            new TwigFunction('flag_variation', $this->getFlagVariation(...)),
+        ];
+    }
+
+    public function isFlagEnabled(string $flagKey): bool
+    {
+        $decision = $this->evaluate($flagKey);
+        return $decision?->enabled ?? false;
+    }
+
+    public function getFlagVariation(string $flagKey): string
+    {
+        $decision = $this->evaluate($flagKey);
+        return $decision?->variationKey ?? 'control';
+    }
+
+    private function evaluate(string $flagKey): ?\SignaKit\FlagsPhp\Types\Decision
+    {
+        $request = $this->requestStack->getCurrentRequest();
+        if ($request === null) {
+            return null;
+        }
+
+        $user   = $request->attributes->get('_user'); // set this if you store user on request
+        $userId = $user?->getUserIdentifier()
+            ?? $request->cookies->get('visitor_id', 'anonymous');
+
+        $ctx = $this->signaKit->createUserContext($userId);
+        return $ctx->decide($flagKey);
+    }
+}
+```
+
+Symfony's autoconfigure will register the extension automatically. Use the functions in any Twig template:
+
+```twig title="templates/checkout/index.html.twig"
+{% if flag_enabled('checkout-redesign') %}
+    {% include 'checkout/_new_flow.html.twig' %}
+{% else %}
+    {% include 'checkout/_legacy_flow.html.twig' %}
+{% endif %}
+
+{# Multi-variation #}
+{% set hero = flag_variation('homepage-hero') %}
+{% if hero == 'treatment-a' %}
+    {% include 'homepage/_hero_a.html.twig' %}
+{% elseif hero == 'treatment-b' %}
+    {% include 'homepage/_hero_b.html.twig' %}
+{% else %}
+    {% include 'homepage/_hero_control.html.twig' %}
+{% endif %}
+```
+
+<Callout type="warning" title="One createUserContext() call per Twig function call">
+Each call to `flag_enabled()` or `flag_variation()` in a template creates a new `SignaKitUserContext`. This is fine for a small number of calls per render — evaluation is local and has no network cost. If you evaluate many flags in the same template, call `decideAll()` once in the controller and pass the results array to the template instead.
+</Callout>
+
+---
+
+## Injecting the client into a service
+
+Any Symfony service can receive `SignaKitClient` via constructor injection — not just controllers and Twig extensions.
+
+```php title="src/Service/PricingService.php"
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use SignaKit\FlagsPhp\SignaKitClient;
+
+final class PricingService
+{
+    public function __construct(
+        private readonly SignaKitClient $signaKit,
+    ) {}
+
+    public function getPriceForUser(string $userId, string $plan): float
+    {
+        $ctx      = $this->signaKit->createUserContext($userId, ['plan' => $plan]);
+        $decision = $ctx->decide('dynamic-pricing-v2');
+
+        if ($decision?->enabled) {
+            return $this->calculateDynamicPrice($userId, $plan);
+        }
+
+        return $this->getStandardPrice($plan);
+    }
+
+    // ...
+}
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `new SignaKitClient()` inside a controller action or service method | Re-fetches config on every request; no exposure deduplication across the request | Register as a service in `services.yaml` and inject the shared instance |
+| Calling `initialize()` inside a controller action | Blocks the request path with a synchronous CDN call | Initialize in `KernelEvents::REQUEST` at high priority so it runs before your controller |
+| `decideAll()` in a subscriber that runs on every request | Evaluates every flag on every request — N flags × all traffic = large event volume | Use `decide('specific-flag')` for only the flags the current route needs |
+| Passing a different `$userId` to `trackEvent()` than to `decide()` | Breaks the experiment attribution chain — conversion is attributed to the wrong user | Use the same `$userId` throughout the request lifecycle; read it once and pass it down |
+| Calling `createUserContext()` before `initialize()` | Throws `\RuntimeException` immediately | Ensure the `SignaKitInitSubscriber` runs (high priority) before any controller or service evaluates flags |
+
+---
+
+## Related
+
+- [PHP SDK reference →](/docs/flags/sdks/php)
+- [Laravel SDK →](/docs/flags/sdks/laravel)
+- [Laravel integration guide →](/docs/flags/guides/laravel-guide)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Quickstart →](/docs/flags/quickstart)

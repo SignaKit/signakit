@@ -1,0 +1,333 @@
+---
+title: Fastify
+description: Integrate SignaKit feature flags into a Fastify application — plugin pattern, request decoration, visitor identity via cookies, and conversion tracking.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# Fastify
+
+**SDK:** `@signakit/flags-node`
+**Fastify version:** 4+
+
+The recommended pattern for Fastify is to wrap the SignaKit client in a **Fastify plugin** that initializes on startup, decorates the instance with `fastify.signakit`, and attaches a `userId` to every request via an `onRequest` hook. Flag evaluation stays in your route handlers — no middleware overhead on routes that don't need it.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install dependencies
+
+```npm
+npm install @signakit/flags-node @fastify/cookie
+```
+
+Add your SDK key to your environment:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create the SignaKit plugin
+
+Create a Fastify plugin that initializes the client once on startup and decorates the instance so every route can reach it.
+
+```ts title="src/plugins/signakit.ts"
+import fp from 'fastify-plugin'
+import { createInstance } from '@signakit/flags-node'
+import type { FastifyPluginAsync } from 'fastify'
+
+const signakitPlugin: FastifyPluginAsync = async (fastify) => {
+  const client = createInstance({
+    sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  })
+
+  const { success, reason } = await client.onReady()
+
+  if (!success) {
+    fastify.log.warn({ reason }, 'SignaKit failed to load config — flags will return null')
+  }
+
+  fastify.decorate('signakit', client)
+}
+
+export default fp(signakitPlugin, {
+  name: 'signakit',
+  fastify: '4.x',
+})
+```
+
+<Callout type="info">
+Wrapping the plugin with `fastify-plugin` (`fp`) prevents Fastify from scoping the decorator to a child context. Without `fp`, `fastify.signakit` would not be visible outside the plugin's encapsulation boundary.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Decorate the request with userId
+
+Add an `onRequest` hook that reads the `visitor_id` cookie and attaches it to every `request` object. For authenticated routes, replace the cookie value with your session's user ID.
+
+```ts title="src/plugins/visitor.ts"
+import fp from 'fastify-plugin'
+import type { FastifyPluginAsync } from 'fastify'
+
+const visitorPlugin: FastifyPluginAsync = async (fastify) => {
+  fastify.decorateRequest('userId', '')
+
+  fastify.addHook('onRequest', async (request, reply) => {
+    const cookieId = request.cookies?.visitor_id
+
+    if (cookieId) {
+      request.userId = cookieId
+      return
+    }
+
+    // No cookie yet — generate a stable ID and set it
+    const newId = crypto.randomUUID()
+    request.userId = newId
+
+    reply.setCookie('visitor_id', newId, {
+      path: '/',
+      httpOnly: true,
+      maxAge: 60 * 60 * 24 * 365, // 1 year
+      sameSite: 'lax',
+    })
+  })
+}
+
+export default fp(visitorPlugin, { name: 'visitor' })
+```
+
+</Step>
+
+<Step>
+
+### Register plugins in your app
+
+Register `@fastify/cookie`, then your plugins, before declaring routes.
+
+```ts title="src/app.ts"
+import Fastify from 'fastify'
+import cookie from '@fastify/cookie'
+import signakitPlugin from './plugins/signakit'
+import visitorPlugin from './plugins/visitor'
+
+const fastify = Fastify({ logger: true })
+
+await fastify.register(cookie)
+await fastify.register(signakitPlugin)
+await fastify.register(visitorPlugin)
+
+// Register your routes after plugins
+await fastify.register(import('./routes/checkout'))
+
+await fastify.listen({ port: 3000 })
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating a flag in a route handler
+
+With the plugins registered, `request.userId` and `fastify.signakit` are available in every route handler.
+
+```ts title="src/routes/checkout.ts"
+import type { FastifyPluginAsync } from 'fastify'
+
+const checkoutRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.get('/checkout', async (request, reply) => {
+    const userCtx = fastify.signakit.createUserContext(request.userId, {
+      $userAgent: request.headers['user-agent'],
+    })
+
+    const checkout = userCtx.decide('checkout-redesign')
+
+    return reply.send({
+      variant: checkout?.variationKey ?? 'control',
+    })
+  })
+}
+
+export default checkoutRoutes
+```
+
+<Callout type="info">
+**Passing `$userAgent`** — SignaKit uses the `$userAgent` attribute to detect bots. Bots receive the `off` variation and do not generate exposure events, keeping your experiment data clean.
+</Callout>
+
+---
+
+## Passing user attributes
+
+If your route has access to a session (via JWT, session store, or another plugin), pass the user's attributes when creating the context for more precise targeting rules.
+
+```ts title="src/routes/dashboard.ts"
+import type { FastifyPluginAsync } from 'fastify'
+
+const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.get('/dashboard', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const session = request.user // set by your auth plugin
+
+    const userCtx = fastify.signakit.createUserContext(session.id, {
+      plan: session.plan,
+      country: session.country,
+      betaTester: session.betaTester ?? false,
+      $userAgent: request.headers['user-agent'],
+    })
+
+    const newDashboard = userCtx.decide('new-dashboard')
+
+    return reply.send({
+      showNewDashboard: newDashboard?.enabled ?? false,
+    })
+  })
+}
+
+export default dashboardRoutes
+```
+
+---
+
+## Tracking conversion events
+
+Call `trackEvent` on the user context after a meaningful action — a purchase, sign-up, or any goal event you've defined in the SignaKit dashboard.
+
+```ts title="src/routes/orders.ts"
+import type { FastifyPluginAsync } from 'fastify'
+
+const orderRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.post('/orders', async (request, reply) => {
+    const { items, total } = request.body as { items: string[]; total: number }
+
+    // ... your order creation logic ...
+
+    const userCtx = fastify.signakit.createUserContext(request.userId)
+    await userCtx.trackEvent('purchase_completed', { value: total })
+
+    return reply.status(201).send({ success: true })
+  })
+}
+
+export default orderRoutes
+```
+
+`trackEvent` returns a `Promise<void>` and never throws — errors are logged internally and do not affect your response path.
+
+---
+
+## A/B testing example
+
+Evaluate a variation and branch your logic on `variationKey`:
+
+```ts title="src/routes/homepage.ts"
+import type { FastifyPluginAsync } from 'fastify'
+
+const homepageRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.get('/', async (request, reply) => {
+    const userCtx = fastify.signakit.createUserContext(request.userId)
+    const hero = userCtx.decide('homepage-hero')
+
+    switch (hero?.variationKey) {
+      case 'treatment-a':
+        return reply.send({ layout: 'hero-v2' })
+      case 'treatment-b':
+        return reply.send({ layout: 'hero-v3' })
+      default:
+        // null (flag off or user not targeted) falls through to control
+        return reply.send({ layout: 'hero-legacy' })
+    }
+  })
+}
+
+export default homepageRoutes
+```
+
+---
+
+## TypeScript: extending FastifyInstance and FastifyRequest
+
+Fastify's decorator system is fully typed. Extend the built-in interfaces so TypeScript knows about `fastify.signakit` and `request.userId`.
+
+```ts title="src/types/fastify.d.ts"
+import type { SignaKitClient } from '@signakit/flags-node'
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    signakit: SignaKitClient
+  }
+
+  interface FastifyRequest {
+    userId: string
+  }
+}
+```
+
+Add this file to your `tsconfig.json`'s `include` array (or place it anywhere TypeScript already picks up):
+
+```json title="tsconfig.json"
+{
+  "compilerOptions": {
+    "strict": true
+  },
+  "include": ["src"]
+}
+```
+
+With the augmentation in place, `fastify.signakit` and `request.userId` are typed throughout your entire application without any casts.
+
+---
+
+## Error handling and graceful degradation
+
+`onReady()` never throws. If the CDN fetch fails after all retries, it resolves with `{ success: false }` and every subsequent `decide()` call returns `null`. Your route code should treat `null` as the off/control state.
+
+```ts title="src/plugins/signakit.ts (with explicit degradation logging)"
+const { success, reason } = await client.onReady()
+
+if (!success) {
+  // Application still starts — flags just return null until config loads
+  fastify.log.error({ reason }, 'SignaKit config unavailable at startup')
+}
+```
+
+```ts
+// Always safe — decide() returns null if the client is not ready
+const decision = userCtx.decide('my-flag')
+const featureEnabled = decision?.enabled ?? false
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside a route handler | Re-fetches config on every request; in-memory dedup is per-instance so every request fires a fresh exposure | Create the client once in the plugin and decorate the Fastify instance |
+| `await client.onReady()` inside a route handler | Adds a network round-trip to every request on cold start | Await `onReady()` in the plugin's `async` body before decorating |
+| `decideAll()` on every request | Evaluates all flags and fires exposures for every flag the user is bucketed into | Use `decide('specific-flag')` in handlers that need it |
+| Forgetting `fastify-plugin` (`fp`) wrapper | The decorator is scoped to the encapsulation context and invisible to sibling/parent routes | Always wrap shared plugins with `fp` |
+| Setting `visitor_id` as a session cookie (no `maxAge`) | Cookie expires when the browser closes — user gets a new ID and a different variation on next visit | Set `maxAge` to a long duration (at least 1 year) for stable bucketing |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/docs/flags/sdks/node)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Express guide →](/docs/flags/guides/express)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

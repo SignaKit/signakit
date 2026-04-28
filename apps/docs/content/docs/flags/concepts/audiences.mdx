@@ -1,0 +1,132 @@
+---
+title: Audiences
+description: Define reusable user segments with attribute rules. Reference them across many flags instead of repeating the same conditions everywhere.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Audiences
+
+An audience is a named, reusable user segment defined in the SignaKit dashboard. It holds a set of attribute rules — for example, `plan equals 'pro'` or `role equals 'admin'` — that evaluate against the attributes you pass when identifying a user.
+
+Flags reference audiences in their targeting rules. Instead of writing `plan equals 'pro'` in a dozen different flags, you define a "Pro Plan" audience once and point each flag at it.
+
+---
+
+## Why audiences exist
+
+Without audiences, every flag that targets the same group of users requires its own copy of the same attribute conditions. When the definition of that group changes — say, beta access now includes `plan equals 'enterprise'` in addition to `plan equals 'beta'` — you have to find and update every flag individually.
+
+Audiences invert that relationship. The segment definition lives in one place. Flags reference it by name. Change the audience, and every flag using it picks up the new definition on the next config refresh.
+
+---
+
+## How audience evaluation works
+
+SignaKit evaluates audiences locally inside the SDK — no network call happens at evaluation time. When the SDK initializes, it fetches a config bundle from the CDN that includes both your flag definitions and the audience rules each flag references. Everything needed to evaluate a flag, including its audiences, is present in memory.
+
+When you call `decide()` on a flag, the SDK:
+
+1. Looks up the flag's targeting rules.
+2. For any rule that references an audience, looks up that audience's rule set in the bundled config.
+3. Evaluates the audience rules against the attributes in the current user context.
+4. Returns the result — no round trip, no latency.
+
+This means audience evaluation is as fast as any other flag evaluation.
+
+---
+
+## Code example
+
+Define a user context with the attributes your audiences reference, then evaluate a flag normally. The audience matching happens automatically inside `decide()`.
+
+```ts title="Node.js"
+import { createClient } from '@signakit/flags-node';
+
+const signakit = createClient({ apiKey: process.env.SIGNAKIT_API_KEY });
+
+// Attributes are matched against audience rules at evaluation time.
+const user = signakit.createUserContext('user_abc123', {
+  plan: 'beta',
+  role: 'member',
+  country: 'US',
+  accountAgeDays: 42,
+});
+
+// If "Beta Users" audience = { plan equals 'beta' OR role equals 'admin' }
+// this user matches because plan equals 'beta'.
+const enabled = await user.decide('new-dashboard');
+
+if (enabled) {
+  // show new dashboard
+}
+```
+
+```tsx title="React"
+import { useFlag } from '@signakit/flags-react';
+
+function Dashboard() {
+  // User context is set once at the provider level with all relevant attributes.
+  const enabled = useFlag('new-dashboard');
+
+  return enabled ? <NewDashboard /> : <LegacyDashboard />;
+}
+```
+
+---
+
+<Callout type="warning">
+Every attribute your audience rules reference must be present in `createUserContext`. If an attribute is missing from the user context, the rule that checks it does not match. Ensure your audience attribute names and the keys you pass to `createUserContext` are identical.
+</Callout>
+
+---
+
+## Audience rule composition
+
+Audience rules support the same operators as direct flag targeting rules:
+
+| Operator | Example |
+|---|---|
+| `equals` | `plan equals 'pro'` |
+| `not_equals` | `plan not_equals 'free'` |
+| `contains` | `email contains '@acme.com'` |
+| `not_contains` | `email not_contains 'test'` |
+| `greater_than` | `accountAgeDays greater_than 30` |
+| `less_than` | `accountAgeDays less_than 7` |
+
+Rules within an audience are combined with **AND** or **OR** logic. A typical audience definition looks like:
+
+```
+Beta Users:
+  plan equals 'beta'
+  OR role equals 'admin'
+```
+
+```
+Engaged Power Users:
+  plan equals 'pro'
+  AND accountAgeDays greater_than 90
+  AND country equals 'US'
+```
+
+Audiences can also be composed together in a flag's targeting rules. For example, a flag might say: "If user is in audience 'Pro Plan' AND rollout bucket is less than 10%, enable." The audience handles the segment match; the rollout percentage handles the gradual release.
+
+---
+
+## Updating audiences
+
+Because audiences are defined once and referenced by name, updating a segment is a single operation. Change the "Beta Users" audience in the dashboard — for example, add `plan equals 'enterprise'` — and every flag that references "Beta Users" picks up the new definition the next time SDK clients refresh their config.
+
+Config is refreshed on SDK initialization and periodically during long-lived server processes. Client-side SDKs refresh when they re-initialize (page load, app launch). For near-immediate propagation you can call the SDK's manual refresh method.
+
+<Callout type="info">
+No SDK re-deploy is required when you update an audience. The audience rules live in the config bundle fetched from the CDN, not in your application code.
+</Callout>
+
+---
+
+## Related
+
+- [Targeted Delivery](/docs/flags/concepts/targeted-delivery) — how flags use audiences and rollout rules together to reach the right users
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how flag evaluation works end-to-end
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — config fetch, local evaluation, and the event pipeline

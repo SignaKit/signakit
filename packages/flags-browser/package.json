@@ -1,0 +1,42 @@
+{
+  "name": "@signakit/flags-browser",
+  "version": "0.1.0",
+  "description": "Official Browser SDK for SignaKit Feature Flags",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["feature-flags", "feature-toggle", "signakit", "ab-testing", "experimentation"],
+  "author": "SignaKit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SignaKit/signakit.git",
+    "directory": "packages/flags-browser"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}

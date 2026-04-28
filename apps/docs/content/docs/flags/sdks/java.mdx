@@ -1,0 +1,496 @@
+---
+title: Java
+description: Full API reference for the SignaKit Java SDK — server-side feature flags with local evaluation for Java 17+, Spring Boot, and any JVM framework.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+
+# Java SDK
+
+**Group ID:** `com.signakit`  
+**Artifact ID:** `flags-java`  
+**Minimum Java version:** 17+
+
+The Java SDK fetches your flag configuration from the SignaKit CDN once on startup, then evaluates all flags **locally** on each request — no network call per evaluation. Exposure and conversion events are posted asynchronously via `CompletableFuture` and do not block your request path.
+
+---
+
+## Installation
+
+<Tabs items={['Maven', 'Gradle']}>
+  <Tab value="Maven">
+    ```xml
+    <dependency>
+      <groupId>com.signakit</groupId>
+      <artifactId>flags-java</artifactId>
+      <version>0.1.0</version>
+    </dependency>
+    ```
+  </Tab>
+  <Tab value="Gradle">
+    ```groovy
+    implementation 'com.signakit:flags-java:0.1.0'
+    ```
+  </Tab>
+</Tabs>
+
+Set your SDK key as an environment variable:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+---
+
+## Initialization
+
+Create the client **once at application startup** — not inside a request handler or service method. A singleton reuses the fetched config across all requests and ensures in-memory exposure deduplication works correctly.
+
+```java
+import com.signakit.flags.SignaKitClient;
+import com.signakit.flags.SignaKitClientConfig;
+
+SignaKitClient client = new SignaKitClient(
+    SignaKitClientConfig.of(System.getenv("SIGNAKIT_SDK_KEY"))
+);
+```
+
+You can also use the builder for additional options:
+
+```java
+SignaKitClientConfig config = SignaKitClientConfig.builder()
+    .sdkKey(System.getenv("SIGNAKIT_SDK_KEY"))
+    .build();
+
+SignaKitClient client = new SignaKitClient(config);
+```
+
+### `SignaKitClientConfig`
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `sdkKey` | `String` | required | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `httpClient` | `java.net.http.HttpClient` | built-in | Optional override, primarily for testing |
+
+Use `SignaKitClientConfig.of(sdkKey)` for the common case where no override is needed.
+
+---
+
+## Spring Boot singleton pattern
+
+Declare the client as a `@Bean` so Spring manages lifecycle and injection. Call `onReady()` inside `@PostConstruct` to block startup until the config is loaded.
+
+```java
+import com.signakit.flags.SignaKitClient;
+import com.signakit.flags.SignaKitClientConfig;
+import jakarta.annotation.PostConstruct;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class SignaKitConfig {
+
+    @Bean
+    public SignaKitClient signaKitClient() {
+        return new SignaKitClient(
+            SignaKitClientConfig.of(System.getenv("SIGNAKIT_SDK_KEY"))
+        );
+    }
+}
+```
+
+```java
+import com.signakit.flags.SignaKitClient;
+import jakarta.annotation.PostConstruct;
+import org.springframework.stereotype.Service;
+
+@Service
+public class FlagService {
+
+    private final SignaKitClient client;
+
+    public FlagService(SignaKitClient client) {
+        this.client = client;
+    }
+
+    @PostConstruct
+    public void init() {
+        boolean ready = client.onReady();
+        if (!ready) {
+            throw new IllegalStateException("[SignaKit] Failed to load flag config on startup");
+        }
+    }
+}
+```
+
+Then inject `SignaKitClient` wherever you need it — Spring handles the singleton guarantee.
+
+<Callout type="danger" title="Anti-pattern: client per request">
+
+```java
+// Never do this — re-fetches config on every request, bypasses deduplication
+@GetMapping("/checkout")
+public String checkout(@RequestParam String userId) {
+    SignaKitClient client = new SignaKitClient(
+        SignaKitClientConfig.of(System.getenv("SIGNAKIT_SDK_KEY"))
+    );
+    client.onReady();
+    // ...
+}
+```
+
+Instantiate the client once at startup and inject the singleton.
+
+</Callout>
+
+---
+
+## Waiting for the client to be ready
+
+Call `onReady()` before evaluating any flags. It synchronously fetches the config from the CDN and returns `true` on success or `false` if all attempts fail.
+
+```java
+boolean ready = client.onReady();
+
+if (!ready) {
+    // Fall back to defaults — createUserContext() returns null when not ready
+    logger.warn("SignaKit failed to load config, using defaults");
+}
+```
+
+An async variant is available if you want to load config without blocking the calling thread:
+
+```java
+CompletableFuture<Boolean> readyFuture = client.onReadyAsync();
+
+readyFuture.thenAccept(ready -> {
+    if (!ready) {
+        logger.warn("SignaKit config load failed");
+    }
+});
+```
+
+`onReady()` never throws — exceptions are caught, logged to stderr, and reflected in the `boolean` return value.
+
+<Callout type="warning" title="createUserContext() returns null when not ready">
+If you call `createUserContext()` before `onReady()` completes successfully, it returns `null` and logs a warning. Always gate your first evaluation behind a successful `onReady()` call.
+</Callout>
+
+---
+
+## Creating a user context
+
+A `SignaKitUserContext` represents a specific user. Create one per request with the user's ID and any attributes you want to use in targeting rules.
+
+```java
+import com.signakit.flags.UserAttributes;
+import com.signakit.flags.SignaKitUserContext;
+
+UserAttributes attrs = UserAttributes.of(Map.of(
+    "plan", "pro",
+    "country", "US",
+    "betaTester", true
+));
+
+SignaKitUserContext userContext = client.createUserContext("user-123", attrs);
+```
+
+You can omit attributes entirely:
+
+```java
+SignaKitUserContext userContext = client.createUserContext("user-123");
+```
+
+### `createUserContext(userId, attributes)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `userId` | `String` | Unique, stable identifier for the user. Used for deterministic bucketing — the same ID always produces the same variation. |
+| `attributes` | `UserAttributes` | Key-value pairs matched against your audience targeting rules in the dashboard. |
+
+**Returns:** `SignaKitUserContext`, or `null` if the client is not ready.
+
+### `UserAttributes`
+
+`UserAttributes` is a typed wrapper around a `Map<String, Object>`. Values may be `String`, `Number`, `Boolean`, or `List<String>`.
+
+```java
+// Build from an existing map
+UserAttributes attrs = UserAttributes.of(Map.of("plan", "pro"));
+
+// Empty attributes
+UserAttributes empty = UserAttributes.empty();
+```
+
+<Callout type="info">
+
+**`$userAgent` attribute** — pass the request `User-Agent` header as `UserAttributes.USER_AGENT_KEY` to enable bot detection. Detected bots receive `enabled: false` / `variationKey: "off"` for every flag and produce no events.
+
+```java
+UserAttributes attrs = UserAttributes.of(Map.of(
+    UserAttributes.USER_AGENT_KEY, request.getHeader("User-Agent"),
+    "plan", "pro"
+));
+```
+
+</Callout>
+
+---
+
+## Evaluating a single flag
+
+```java
+import com.signakit.flags.Decision;
+
+Decision decision = userContext.decide("new-checkout");
+
+if (decision != null && decision.enabled()) {
+    // Show the new checkout experience
+    System.out.println(decision.variationKey()); // e.g. "treatment"
+}
+```
+
+### `decide(flagKey)`
+
+Returns a `Decision` record, or `null` if the flag does not exist, is archived, or the user does not match any targeting rule.
+
+| Field | Type | Description |
+|---|---|---|
+| `flagKey` | `String` | The flag key you passed in |
+| `enabled` | `boolean` | Whether the flag is on for this user |
+| `variationKey` | `String` | Which variation the user is in (`"control"`, `"treatment"`, or your custom key) |
+| `ruleKey` | `String` | The targeting rule that matched (nullable) |
+| `ruleType` | `RuleType` | The type of rule: `AB_TEST`, `MULTI_ARMED_BANDIT`, or `TARGETED` (nullable) |
+| `variables` | `Map<String, Object>` | Per-variation variable overrides (may be empty) |
+
+**Always null-check the return value.** A `null` result means the flag was not found or the user did not match any rule — treat it as the disabled/control state.
+
+```java
+Decision decision = userContext.decide("my-flag");
+boolean showFeature = decision != null && decision.enabled();
+```
+
+---
+
+## Evaluating all flags at once
+
+```java
+import java.util.Map;
+
+Map<String, Decision> decisions = userContext.decideAll();
+
+if (decisions.containsKey("new-checkout") && decisions.get("new-checkout").enabled()) {
+    // ...
+}
+```
+
+### `decideAll()`
+
+Returns a `Map<String, Decision>` keyed by flag key. Only flags where the user matches a targeting rule are included in the map.
+
+<Callout type="warning" title="Use decideAll() selectively">
+Calling `decideAll()` evaluates every flag in your project and fires an `$exposure` event for each A/B test or multi-armed bandit the user is bucketed into. In a servlet filter or Spring interceptor that runs on every request, evaluate only the flags your route actually needs. `decideAll()` in a global filter is one of the most common causes of unexpected event volume spikes.
+</Callout>
+
+---
+
+## Tracking events
+
+Track a conversion or goal event that you've defined in the SignaKit dashboard.
+
+```java
+import com.signakit.flags.TrackEventOptions;
+
+// Fire and forget — returns CompletableFuture<Void>
+userContext.trackEvent("purchase_completed",
+    TrackEventOptions.builder()
+        .value(99.99)
+        .metadata(Map.of("plan", "pro", "items", 3))
+        .build()
+);
+```
+
+Without options:
+
+```java
+userContext.trackEvent("signup_completed");
+```
+
+### `trackEvent(eventKey, options?)`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventKey` | `String` | The event name, matching an event definition in your project. Truncated to 100 characters. |
+| `options` | `TrackEventOptions` | Optional extras — see table below |
+
+**Returns:** `CompletableFuture<Void>` — fire and forget. Errors are logged to stderr but never thrown.
+
+### `TrackEventOptions`
+
+Built via `TrackEventOptions.builder()`:
+
+| Field | Type | Description |
+|---|---|---|
+| `value` | `double` | Numeric value associated with the event (e.g. order total, score) |
+| `metadata` | `Map<String, Object>` | Arbitrary key-value payload. Dropped silently if serialized size exceeds 5,000 bytes. |
+
+---
+
+## Types
+
+### `Decision` (record)
+
+```java
+package com.signakit.flags;
+
+public record Decision(
+    String flagKey,
+    String variationKey,
+    boolean enabled,
+    String ruleKey,
+    RuleType ruleType,
+    Map<String, Object> variables
+) {
+    public Optional<RuleType> ruleTypeOptional() { ... }
+}
+```
+
+### `RuleType` (enum)
+
+```java
+public enum RuleType {
+    AB_TEST("ab-test"),
+    MULTI_ARMED_BANDIT("multi-armed-bandit"),
+    TARGETED("targeted");
+}
+```
+
+`TARGETED` rules are simple feature-flag rollouts — no experiment attribution. The SDK intentionally skips firing `$exposure` events for `TARGETED` decisions. `AB_TEST` and `MULTI_ARMED_BANDIT` decisions fire exposure events asynchronously.
+
+### `UserAttributes`
+
+```java
+// Construction
+UserAttributes attrs = UserAttributes.of(Map.of("plan", "pro"));
+UserAttributes empty  = UserAttributes.empty();
+
+// Access
+attrs.get("plan");        // Object
+attrs.userAgent();        // String — the $userAgent value, or null
+attrs.asMap();            // unmodifiable Map<String, Object>
+attrs.withoutUserAgent(); // Map<String, Object> — $userAgent stripped
+```
+
+### `TrackEventOptions`
+
+```java
+TrackEventOptions opts = TrackEventOptions.builder()
+    .value(49.99)
+    .metadata(Map.of("sku", "ABC-123"))
+    .build();
+
+TrackEventOptions empty = TrackEventOptions.empty();
+```
+
+### `SignaKitClientConfig`
+
+```java
+// Shorthand
+SignaKitClientConfig config = SignaKitClientConfig.of(sdkKey);
+
+// Builder
+SignaKitClientConfig config = SignaKitClientConfig.builder()
+    .sdkKey(sdkKey)
+    .httpClient(customHttpClient) // optional — for testing
+    .build();
+```
+
+---
+
+## A/B testing
+
+When a flag is running as an experiment, `decide()` returns the assigned variation. The SDK automatically fires an `$exposure` event for `AB_TEST` and `MULTI_ARMED_BANDIT` rules.
+
+```java
+Decision checkout = userContext.decide("checkout-redesign");
+
+if (checkout == null) {
+    return renderLegacyCheckout(); // flag off or user not targeted
+}
+
+return switch (checkout.variationKey()) {
+    case "control"     -> renderLegacyCheckout();
+    case "treatment-a" -> renderCheckoutV2();
+    case "treatment-b" -> renderCheckoutV3();
+    default            -> renderLegacyCheckout();
+};
+```
+
+Track your primary metric when the user converts:
+
+```java
+// After the user completes the purchase
+userContext.trackEvent("purchase_completed",
+    TrackEventOptions.builder().value(order.getTotal()).build()
+);
+```
+
+---
+
+## Targeted delivery
+
+When a flag is configured as a targeted rollout (not an experiment), `decide()` returns `enabled: true` for users who match the audience rule. No primary metric is needed and no `$exposure` event is fired.
+
+```java
+Decision betaAccess = userContext.decide("beta-dashboard");
+
+if (betaAccess != null && betaAccess.enabled()) {
+    return ResponseEntity.status(302).header("Location", "/dashboard/beta").build();
+}
+```
+
+Bucketing is deterministic — the same `userId` always produces the same outcome for the same flag configuration, across all SignaKit SDKs (Node.js, PHP, Java, etc.).
+
+---
+
+## Error handling
+
+`onReady()` never throws. If the config fetch fails, it returns `false` and logs the reason to stderr. After that, `createUserContext()` returns `null` — your code should treat this as the default/off state.
+
+```java
+boolean ready = client.onReady();
+if (!ready) {
+    logger.warn("SignaKit unavailable, using defaults");
+}
+
+// Always null-safe — createUserContext returns null if not ready
+SignaKitUserContext userContext = client.createUserContext(userId, attrs);
+if (userContext == null) {
+    return serveDefaultExperience();
+}
+
+Decision decision = userContext.decide("my-flag");
+boolean enabled = decision != null && decision.enabled();
+```
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `new SignaKitClient(...)` inside a request handler or `@RequestScope` bean | Re-fetches config on every request; exposure deduplication is per-instance, so every request fires a fresh exposure | Instantiate once at startup and inject the singleton |
+| Not calling `onReady()` before the first `decide()` | `createUserContext()` returns `null` if the client is not ready | Call `onReady()` in `@PostConstruct` or application startup |
+| Ignoring the `null` return from `createUserContext()` | `NullPointerException` at the `decide()` call site if the client failed to load | Null-check the context and fall back to defaults |
+| `decideAll()` in a servlet filter or Spring interceptor | Evaluates every flag on every request; N flags × all traffic = high event volume | Use `decide("specific-flag")` in filters |
+| Evaluating a flag inside a loop (per list item, per product row) | One exposure per iteration per render | Evaluate once per request, reuse the `Decision` result |
+
+---
+
+## Related
+
+- [Quickstart →](/docs/flags/quickstart)
+- [Spring Boot guide →](/docs/flags/guides/spring-boot)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

@@ -1,0 +1,92 @@
+---
+title: Environments
+description: Manage flags independently across Development and Production with separate SDK keys per environment.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Environments
+
+Every SignaKit project has two environments: **Development** and **Production**. Environments let you change flag states, run experiments, and test targeting rules without affecting what your users see in production. A flag can be fully enabled in Development and completely off in Production — at the same time.
+
+---
+
+## How environments work
+
+Each environment is an isolated configuration space. Flag states, targeting rules, percentage rollouts, and experiment assignments are all stored and evaluated independently. Changing a flag in Development has no effect on Production.
+
+| Environment | Purpose |
+|---|---|
+| **Development** | Local and CI testing. Enable flags freely without risk. |
+| **Production** | Live traffic. Changes here affect real users immediately. |
+
+The workflow is intentional: turn a flag on in Development, validate the behavior, then flip it in Production when you're confident.
+
+---
+
+## SDK keys
+
+Each environment has its own SDK key. The key determines which environment's flag configuration the SDK fetches. A key scoped to Development will never return Production flag states, and vice versa.
+
+SDK keys follow this format:
+
+```
+sk_dev_yourOrgId_yourProjectId_randomString   # Development
+sk_prod_yourOrgId_yourProjectId_randomString  # Production
+```
+
+To find your SDK keys, open the SignaKit dashboard, select your project, and navigate to **Settings → SDK Keys**.
+
+<Callout type="danger">
+  Never use a `sk_prod_` key in client-side or browser code. Expose one and anyone can read your production flag configuration. Use `sk_dev_` keys during development. Server-side code in your production environment is the only appropriate place for `sk_prod_` keys.
+</Callout>
+
+---
+
+## Configuring your SDK key
+
+Store the key in an environment variable and let your deployment environment supply the correct value.
+
+```bash title=".env.local"
+SIGNAKIT_SDK_KEY=sk_dev_xxxx
+```
+
+```bash title="Production environment variables (e.g. Vercel, Railway, AWS)"
+SIGNAKIT_SDK_KEY=sk_prod_xxxx
+```
+
+Your application code reads the same variable in both environments:
+
+```typescript title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+```
+
+No code changes are needed when going to production — only the environment variable value changes.
+
+---
+
+## Flag states are independent per environment
+
+A flag's enabled/disabled state, targeting rules, rollout percentage, and experiment configuration are stored separately for each environment. There is no automatic sync between Development and Production.
+
+Some common scenarios:
+
+| Scenario | Development | Production |
+|---|---|---|
+| New feature in progress | On (100%) | Off |
+| Gradual rollout | On (100%) | On (25%) |
+| Fully shipped | On (100%) | On (100%) |
+
+Select the environment from the top navigation in the dashboard, then configure the flag — every change applies only to the selected environment.
+
+---
+
+## Related
+
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how flag config is fetched and decisions are evaluated
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — how the SDK fetches and caches flag config
+- [Node.js SDK](/docs/flags/sdks/node) — initializing the SDK with an SDK key

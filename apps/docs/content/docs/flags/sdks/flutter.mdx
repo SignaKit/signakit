@@ -1,0 +1,451 @@
+---
+title: Flutter
+description: Full API reference for signakit_flags — SignaKitProvider, FlagBuilder, and the low-level client for local-evaluation feature flags in Flutter applications.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Flutter SDK
+
+**Package:** `signakit_flags`
+**Registry:** pub.dev
+**Requirements:** Dart ≥ 3.0, Flutter ≥ 3.10
+
+The Flutter SDK fetches your flag configuration from the SignaKit CDN once on startup, then evaluates all flags **locally** on each call — no network round-trip per evaluation. Exposure and conversion events are sent asynchronously and never block the UI thread.
+
+---
+
+## Installation
+
+Add `signakit_flags` to your `pubspec.yaml`:
+
+```yaml
+dependencies:
+  signakit_flags: ^0.1.0
+```
+
+Then fetch the dependency:
+
+```bash
+flutter pub get
+```
+
+---
+
+## Widget tree integration
+
+The recommended approach is to place `SignaKitProvider` near the root of your widget tree, above `MaterialApp` (or `CupertinoApp`). This initializes the client once and makes flag decisions available to every descendant via `FlagBuilder` or `SignaKitProvider.of()`.
+
+```dart title="main.dart"
+import 'package:flutter/material.dart';
+import 'package:signakit_flags/signakit_flags.dart';
+
+void main() {
+  runApp(
+    SignaKitProvider(
+      sdkKey: 'sk_dev_yourOrgId_yourProjectId_random',
+      userId: 'user-123',
+      attributes: const {'plan': 'pro', 'country': 'US'},
+      loadingFallback: const MaterialApp(
+        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+      ),
+      child: const MyApp(),
+    ),
+  );
+}
+```
+
+<Callout type="info">
+**`loadingFallback` is optional.** When omitted, `SignaKitProvider` renders its `child` immediately while initializing. `FlagBuilder` will report `loading: true` until the client is ready, so you can handle the loading state per-widget instead.
+</Callout>
+
+### `SignaKitProvider` props
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `sdkKey` | `String` | ✓ | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `userId` | `String` | ✓ | Stable unique identifier for the current user. Changes trigger re-evaluation of all flags. |
+| `attributes` | `UserAttributes` (`Map<String, Object?>`) | — | Key-value pairs matched against your audience targeting rules. Defaults to `{}`. |
+| `child` | `Widget` | ✓ | The widget subtree that can access flag decisions |
+| `loadingFallback` | `Widget?` | — | Rendered while the client is initializing. When `null`, `child` renders immediately with `loading: true` in `FlagBuilder`. |
+
+When `userId` or `attributes` change (for example, after a user signs in), `SignaKitProvider` automatically recreates the user context so all descendant `FlagBuilder` widgets re-evaluate with the new identity.
+
+---
+
+## Waiting for the client to be ready
+
+`SignaKitProvider` handles the ready check for you. If you are using the low-level `SignaKitClient` directly (without the widget layer), call `onReady()` before calling `createUserContext`.
+
+```dart
+final client = SignaKitClient(
+  SignaKitClientConfig(sdkKey: 'sk_dev_yourOrgId_yourProjectId_random'),
+);
+
+final result = await client.onReady();
+
+if (!result.success) {
+  debugPrint('SignaKit failed to load config: ${result.reason}');
+  // decide() returns null when not ready — treat as disabled/control
+}
+```
+
+### `onReady()` return value — `OnReadyResult`
+
+| Field | Type | Description |
+|---|---|---|
+| `success` | `bool` | `true` when the config was fetched successfully |
+| `reason` | `String?` | Human-readable error message when `success` is `false` |
+
+`onReady()` never throws. On failure it resolves with `success: false` and a `reason` string. After a failed initialization, `createUserContext` returns `null` and `decide()` returns `null` — both are safe to call without guarding.
+
+---
+
+## Creating a user context
+
+A `SignaKitUserContext` represents a specific user. When using the widget layer, `SignaKitProvider` creates and manages the user context for you. When using the low-level client directly, call `createUserContext` after `onReady` resolves successfully.
+
+```dart
+final userContext = client.createUserContext(
+  'user-123',
+  attributes: {
+    'plan': 'pro',
+    'country': 'US',
+    'betaTester': true,
+  },
+);
+```
+
+### `createUserContext(userId, {attributes})`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `userId` | `String` | Unique, stable identifier for the user. Used for deterministic bucketing — the same ID always produces the same variation for the same flag configuration. |
+| `attributes` | `UserAttributes` (`Map<String, Object?>`) | Key-value pairs matched against your audience targeting rules. Supported value types: `String`, `num`, `bool`, `List`. |
+
+**Returns** `SignaKitUserContext?` — `null` if the client is not yet ready (i.e., `onReady()` has not resolved with `success: true`).
+
+<Callout type="info">
+**`$userAgent` attribute** — pass a user-agent string as `$userAgent` to enable bot detection. When a bot is detected, all flags return `enabled: false` with `variationKey: 'off'`, and no events are fired.
+
+```dart
+final userContext = client.createUserContext(
+  userId,
+  attributes: {
+    r'$userAgent': Platform.operatingSystem, // or a real UA string
+    'plan': 'pro',
+  },
+);
+```
+</Callout>
+
+---
+
+## Evaluating a single flag — `decide()`
+
+Use `FlagBuilder` in the widget tree, or call `decide()` on a `SignaKitUserContext` directly.
+
+### With `FlagBuilder` (recommended)
+
+`FlagBuilder` reads the nearest `SignaKitProvider`, calls `decide()` for the given `flagKey`, and rebuilds when the user context changes.
+
+```dart
+import 'package:signakit_flags/signakit_flags.dart';
+
+class CheckoutScreen extends StatelessWidget {
+  const CheckoutScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return FlagBuilder(
+      flagKey: 'new-checkout',
+      builder: (context, flag) {
+        if (flag.loading) return const CircularProgressIndicator();
+        return flag.enabled ? const NewCheckout() : const LegacyCheckout();
+      },
+    );
+  }
+}
+```
+
+### With `decide()` directly
+
+```dart
+final decision = userContext.decide('new-checkout');
+
+if (decision?.enabled == true) {
+  // Show the new checkout experience
+  print(decision!.variationKey); // e.g. "treatment"
+}
+```
+
+### `decide(flagKey)` return value — `Decision?`
+
+Returns a `Decision` object, or `null` if the flag does not exist, the client is not ready, or the user does not match any targeting rule.
+
+| Field | Type | Description |
+|---|---|---|
+| `flagKey` | `String` | The flag key you passed in |
+| `enabled` | `bool` | Whether the flag is on for this user |
+| `variationKey` | `String` | Which variation the user is in (`'control'`, `'treatment'`, or your custom key) |
+| `ruleKey` | `String?` | The targeting rule that matched, or `null` for default/disabled paths |
+| `ruleType` | `RuleType?` | `RuleType.abTest`, `RuleType.multiArmedBandit`, or `RuleType.targeted`. `null` for default paths. |
+| `variables` | `Map<String, VariableValue>` | Resolved variable values for the matched variation |
+
+Always null-check the return value. A `null` result means the flag was not found or the user did not match any rule — treat it as the disabled/control state.
+
+```dart
+final decision = userContext.decide('my-flag');
+final showFeature = decision?.enabled ?? false;
+```
+
+### `FlagSnapshot` fields (from `FlagBuilder`)
+
+`FlagBuilder` exposes a `FlagSnapshot` rather than a raw `Decision?`. It adds a `loading` field and uses safe defaults while the client initializes.
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | `bool` | Whether the flag is on. `false` while loading. |
+| `variationKey` | `String` | Assigned variation key. `'off'` while loading or flag off/not found. |
+| `ruleKey` | `String?` | Matched rule key. `null` while loading or no match. |
+| `ruleType` | `RuleType?` | Rule type that produced this decision. `null` while loading or no match. |
+| `variables` | `Map<String, VariableValue>` | Resolved variable values. Empty map while loading. |
+| `loading` | `bool` | `true` until the `SignaKitProvider` finishes fetching config. |
+
+---
+
+## Evaluating all flags — `decideAll()`
+
+```dart
+final decisions = userContext.decideAll();
+
+if (decisions['new-sidebar']?.enabled == true) {
+  // show new sidebar
+}
+if (decisions['beta-analytics']?.enabled == true) {
+  // show beta analytics
+}
+```
+
+### `decideAll()` return value — `Decisions`
+
+`Decisions` is a `typedef` for `Map<String, Decision>`. Only flags where the user matches a targeting rule are included. Returns an empty map when the client is not ready.
+
+<Callout type="warning" title="Use decideAll() selectively">
+`decideAll()` evaluates every flag in your project and fires an `$exposure` event for each one the user is bucketed into. Only call it when you genuinely need all flags at once — for example, on app startup to prefetch decisions for the entire session. Calling it on every screen rebuild is one of the most common causes of unexpected event volume spikes.
+</Callout>
+
+---
+
+## Tracking events — `trackEvent()`
+
+Track a conversion or goal event that you have defined in the SignaKit dashboard.
+
+```dart
+await userContext.trackEvent(
+  'purchase_completed',
+  value: 99.99,
+  metadata: {'plan': 'pro'},
+);
+```
+
+### `trackEvent(eventKey, {value, metadata})`
+
+| Parameter | Type | Description |
+|---|---|---|
+| `eventKey` | `String` | The event name, matching an event definition in your project |
+| `value` | `num?` | Optional numeric value (e.g. purchase amount, duration) |
+| `metadata` | `Map<String, Object?>?` | Optional metadata sent with the event. Must be JSON-serializable. Silently dropped if serialized size exceeds the SDK limit. |
+
+**Returns** `Future<void>` — fire and forget. Errors are caught and silently ignored; they never propagate to your code.
+
+Track events after a user interacts, not speculatively. The event is automatically annotated with the variation decisions the user has already been exposed to, so conversion attribution works without extra configuration.
+
+```dart
+// Inside a button's onPressed handler
+ElevatedButton(
+  onPressed: () async {
+    await processOrder(cart);
+    await userContext.trackEvent(
+      'order_placed',
+      value: cart.total,
+      metadata: {'itemCount': cart.items.length},
+    );
+  },
+  child: const Text('Place order'),
+)
+```
+
+---
+
+## Dart types
+
+```dart
+import 'package:signakit_flags/signakit_flags.dart';
+
+// Client and config
+SignaKitClient client = SignaKitClient(SignaKitClientConfig(sdkKey: '...'));
+SignaKitClientConfig config = SignaKitClientConfig(sdkKey: '...');
+
+// Convenience constructor (returns null on invalid key instead of throwing)
+SignaKitClient? client = createInstance(SignaKitClientConfig(sdkKey: '...'));
+
+// User context
+SignaKitUserContext? ctx = client.createUserContext('user-123', attributes: {});
+
+// Decision
+Decision? decision = ctx?.decide('flag-key');
+Decisions decisions = ctx?.decideAll() ?? {};
+
+// Ready result
+OnReadyResult result = await client.onReady();
+// result.success — bool
+// result.reason  — String?
+
+// Rule type enum
+RuleType.abTest
+RuleType.multiArmedBandit
+RuleType.targeted
+
+// User attributes type alias
+typedef UserAttributes = Map<String, Object?>;
+
+// Variable value type alias (String, num, bool, or Map<String, Object?>)
+typedef VariableValue = Object;
+
+// Widget layer
+SignaKitProvider(sdkKey: '...', userId: '...', child: ...)
+SignaKitContextValue value = SignaKitProvider.of(context);
+SignaKitContextValue? value = SignaKitProvider.maybeOf(context);
+FlagBuilder(flagKey: '...', builder: (context, FlagSnapshot snapshot) { ... })
+```
+
+---
+
+## Widget integration patterns
+
+### A/B test with `FlagBuilder`
+
+```dart
+class CheckoutPage extends StatelessWidget {
+  const CheckoutPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return FlagBuilder(
+      flagKey: 'checkout-redesign',
+      builder: (context, flag) {
+        if (flag.loading) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        return switch (flag.variationKey) {
+          'treatment-a' => const CheckoutV2(),
+          'treatment-b' => const CheckoutV3(),
+          _ => const LegacyCheckout(), // 'control' or flag off
+        };
+      },
+    );
+  }
+}
+```
+
+### Reading the context value imperatively
+
+When you need the decision outside of a `builder` callback — for example, in a `StatefulWidget`'s event handler — read the context value directly:
+
+```dart
+void _onCheckoutTap(BuildContext context) {
+  final signakit = SignaKitProvider.of(context);
+  final decision = signakit.userContext?.decide('express-checkout');
+
+  if (decision?.enabled == true) {
+    Navigator.of(context).pushNamed('/checkout/express');
+  } else {
+    Navigator.of(context).pushNamed('/checkout');
+  }
+}
+```
+
+`SignaKitProvider.maybeOf(context)` returns `null` instead of throwing when called outside a provider — useful in shared widgets that may or may not have a provider ancestor.
+
+### Reacting to user sign-in
+
+Pass the authenticated user's ID and attributes to `SignaKitProvider`. Flutter's widget rebuild mechanism propagates the change automatically.
+
+```dart
+class RootApp extends StatelessWidget {
+  const RootApp({super.key, required this.session});
+
+  final UserSession? session;
+
+  @override
+  Widget build(BuildContext context) {
+    return SignaKitProvider(
+      sdkKey: const String.fromEnvironment('SIGNAKIT_SDK_KEY'),
+      userId: session?.userId ?? 'anonymous',
+      attributes: session != null
+          ? {'plan': session.plan, 'country': session.country}
+          : const {},
+      child: const MaterialApp(home: HomeScreen()),
+    );
+  }
+}
+```
+
+When `session` changes (sign in / sign out), Flutter rebuilds `RootApp`, `SignaKitProvider` detects the changed `userId` and `attributes`, and recreates the user context — no manual refresh needed.
+
+---
+
+## Low-level client (without widgets)
+
+If your Flutter app does not use the standard widget layer — for example, in background isolates or non-UI code — you can use `SignaKitClient` directly.
+
+```dart
+import 'package:signakit_flags/signakit_flags.dart';
+
+class FlagService {
+  FlagService() {
+    _client = SignaKitClient(
+      SignaKitClientConfig(sdkKey: 'sk_dev_yourOrgId_yourProjectId_random'),
+    );
+    _readyFuture = _client.onReady();
+  }
+
+  late final SignaKitClient _client;
+  late final Future<OnReadyResult> _readyFuture;
+
+  Future<bool> isEnabled(String flagKey, String userId) async {
+    await _readyFuture;
+    final ctx = _client.createUserContext(userId);
+    return ctx?.decide(flagKey)?.enabled ?? false;
+  }
+
+  void dispose() => _client.close();
+}
+```
+
+Call `client.close()` when the client is no longer needed to release the underlying HTTP connection pool.
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Creating a new `SignaKitClient` in `build()` | A new client fetches config on every rebuild; deduplication is per-instance so each rebuild fires fresh exposure events | Create the client once — use `SignaKitProvider` or a singleton service |
+| Not awaiting `onReady()` before calling `createUserContext` | `createUserContext` returns `null` when the client is not ready, causing a silent null-safety crash | Await `onReady()` before creating a user context, or use `SignaKitProvider` which handles this for you |
+| Calling `userContext.decide()` directly inside `build()` | Works, but bypasses `FlagBuilder`'s rebuild subscription — the widget will not update when the user context changes | Use `FlagBuilder` for any flag-gated UI in the widget tree |
+| Calling `decideAll()` on every `build()` call | Evaluates every flag and fires an `$exposure` event on every rebuild | Call `decideAll()` once per session (e.g., in `initState`) and cache the result, or use `FlagBuilder` per flag |
+| Hardcoding the SDK key as a string literal in source | Leaks credentials into version control | Use `const String.fromEnvironment('SIGNAKIT_SDK_KEY')` or a secrets manager |
+
+---
+
+## Related
+
+- [Quickstart →](/docs/flags/quickstart)
+- [React Native SDK →](/docs/flags/sdks/react-native)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)

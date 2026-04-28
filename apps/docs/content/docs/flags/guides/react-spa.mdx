@@ -1,0 +1,357 @@
+---
+title: React SPA
+description: Integrate SignaKit feature flags into a Vite or Create React App single-page application — set up SignaKitProvider, resolve a stable visitor ID, evaluate flags with useFlag, and track conversions.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+
+# React SPA
+
+**SDK:** `@signakit/flags-react` + `@signakit/flags-browser`
+**Environments:** Vite, Create React App, or any bundler — purely client-side
+
+In a React SPA there is no server. All flag evaluation happens in the browser: the SDK fetches your project config, evaluates rules locally, and persists a stable visitor ID in `localStorage`. This guide covers setup from scratch through conversion tracking.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDKs
+
+```npm
+npm install @signakit/flags-react @signakit/flags-browser
+```
+
+</Step>
+
+<Step>
+
+### Create a visitor ID utility
+
+SignaKit uses `userId` as the bucketing key — the same ID always produces the same variation. For anonymous visitors in a SPA, generate a UUID on first visit and persist it in `localStorage` so the same user always gets the same variation across sessions.
+
+```ts title="src/lib/visitor.ts"
+const VISITOR_KEY = 'sk_visitor_id'
+
+export function getVisitorId(): string {
+  const existing = localStorage.getItem(VISITOR_KEY)
+  if (existing) return existing
+
+  // crypto.randomUUID() is available in all modern browsers
+  const id = crypto.randomUUID()
+  localStorage.setItem(VISITOR_KEY, id)
+  return id
+}
+```
+
+If your app has authenticated users, skip this and use your auth session's user ID instead — authenticated IDs produce more reliable experiment results because they survive browser clears and cross-device use.
+
+</Step>
+
+<Step>
+
+### Wrap your app root with `SignaKitProvider`
+
+Call `getVisitorId()` before rendering and pass the result to the provider. Because `getVisitorId()` is synchronous, you can call it directly in `main.tsx`.
+
+```tsx title="src/main.tsx"
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { SignaKitProvider } from '@signakit/flags-react'
+import { getVisitorId } from './lib/visitor'
+import App from './App'
+
+const visitorId = getVisitorId()
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <SignaKitProvider
+      sdkKey="sk_browser_yourOrgId_yourProjectId_random"
+      userId={visitorId}
+      loadingFallback={<div>Loading…</div>}
+    >
+      <App />
+    </SignaKitProvider>
+  </StrictMode>
+)
+```
+
+<Callout type="warning" title="Use a browser SDK key, not sk_prod_">
+SDK keys beginning with `sk_prod_` are server-side keys — they carry elevated permissions and must never appear in a browser bundle. Use a browser-appropriate key from your SignaKit project settings. The browser key is intentionally safe to expose; it can only read your flag config, not write to your project.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Pass user attributes for targeting
+
+If you have attributes at render time (from a stored profile, query string, or feature-detection), pass them to the provider so targeting rules can match against them.
+
+```tsx title="src/main.tsx"
+import { StrictMode, useMemo } from 'react'
+import { createRoot } from 'react-dom/client'
+import { SignaKitProvider } from '@signakit/flags-react'
+import { getVisitorId } from './lib/visitor'
+import App from './App'
+
+const visitorId = getVisitorId()
+
+// Read stored attributes if available — adjust to your auth/storage layer
+const storedPlan = localStorage.getItem('sk_plan') ?? 'free'
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <SignaKitProvider
+      sdkKey="sk_browser_yourOrgId_yourProjectId_random"
+      userId={visitorId}
+      attributes={{ plan: storedPlan }}
+      loadingFallback={<div>Loading…</div>}
+    >
+      <App />
+    </SignaKitProvider>
+  </StrictMode>
+)
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## Evaluating flags
+
+### `useFlag` hook
+
+`useFlag` evaluates a single flag for the current user. Always check `loading` before branching on `enabled` — the provider needs one async round-trip to fetch your project config.
+
+```tsx title="src/components/Checkout.tsx"
+import { useFlag } from '@signakit/flags-react'
+import { NewCheckout } from './NewCheckout'
+import { LegacyCheckout } from './LegacyCheckout'
+import { CheckoutSkeleton } from './CheckoutSkeleton'
+
+export function Checkout() {
+  const { enabled, variationKey, loading } = useFlag('checkout-redesign')
+
+  if (loading) return <CheckoutSkeleton />
+
+  return enabled ? <NewCheckout /> : <LegacyCheckout />
+}
+```
+
+`useFlag` returns:
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | `boolean` | `true` when the flag is on for this user. Always `false` while loading. |
+| `variationKey` | `string` | Assigned variation key (`'on'`, `'off'`, `'treatment'`, etc.). `'off'` while loading. |
+| `ruleKey` | `string \| null` | Matched rule key, or `null`. |
+| `ruleType` | `string \| null` | Rule type that produced the decision (`'experiment'`, `'rollout'`, `'targeted'`, etc.). |
+| `variables` | `Record<string, VariableValue>` | Resolved variable values for the matched variation. |
+| `loading` | `boolean` | `true` until the provider finishes fetching config. |
+
+### `FlagGate` component
+
+Use `FlagGate` when you want declarative show/hide without writing a `loading` branch yourself. Children render only after loading is complete and the flag is enabled; the `fallback` renders while loading or when the flag is off.
+
+```tsx title="src/components/Dashboard.tsx"
+import { FlagGate } from '@signakit/flags-react'
+import { BetaAnalytics } from './BetaAnalytics'
+import { NewSidebar } from './NewSidebar'
+
+export function Dashboard() {
+  return (
+    <div>
+      <FlagGate flag="new-sidebar">
+        <NewSidebar />
+      </FlagGate>
+
+      <FlagGate flag="beta-analytics" fallback={<p>Analytics coming soon.</p>}>
+        <BetaAnalytics />
+      </FlagGate>
+    </div>
+  )
+}
+```
+
+`FlagGate` props:
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `flag` | `string` | ✓ | Flag key to evaluate |
+| `fallback` | `ReactNode` | — | Rendered while loading or when flag is off |
+
+### Reading variables
+
+When your flag has variable values (e.g. a banner colour or copy string), read them from `variables` in the `useFlag` result.
+
+```tsx title="src/components/Banner.tsx"
+import { useFlag } from '@signakit/flags-react'
+
+export function PromoBanner() {
+  const { enabled, variables, loading } = useFlag('promo-banner')
+
+  if (loading || !enabled) return null
+
+  const headline = typeof variables.headline === 'string'
+    ? variables.headline
+    : 'Limited time offer'
+
+  return <div className="banner">{headline}</div>
+}
+```
+
+---
+
+## Updating `userId` after login
+
+If a visitor logs in after the app loads, update `userId` on the provider. Changing `userId` triggers re-evaluation of all flags automatically.
+
+```tsx title="src/App.tsx"
+import { useState } from 'react'
+import { SignaKitProvider } from '@signakit/flags-react'
+import { getVisitorId } from './lib/visitor'
+
+export default function App() {
+  // Start with the anonymous visitor ID; swap to the real user ID after login
+  const [userId, setUserId] = useState(getVisitorId)
+
+  function handleLogin(user: { id: string }) {
+    setUserId(user.id)
+  }
+
+  return (
+    <SignaKitProvider
+      sdkKey="sk_browser_yourOrgId_yourProjectId_random"
+      userId={userId}
+    >
+      <Router onLogin={handleLogin} />
+    </SignaKitProvider>
+  )
+}
+```
+
+<Callout type="info">
+When the same user is seen anonymously and then logs in, SignaKit uses the `userId` at the time of each event. If you want to stitch the anonymous and authenticated sessions together, alias the visitor ID to the real user ID in your analytics pipeline — SignaKit does not perform cross-device identity resolution itself.
+</Callout>
+
+---
+
+## Memoizing attributes
+
+`SignaKitProvider` re-evaluates all flags when `attributes` changes reference. If you construct the attributes object inside a component render, wrap it in `useMemo` to keep the reference stable.
+
+```tsx title="src/App.tsx"
+import { useMemo } from 'react'
+import { SignaKitProvider } from '@signakit/flags-react'
+
+export default function App() {
+  const user = useCurrentUser() // your auth hook
+
+  // ✓ Stable reference — only updates when plan or country change
+  const attributes = useMemo(
+    () => ({ plan: user?.plan ?? 'free', country: user?.country ?? 'US' }),
+    [user?.plan, user?.country]
+  )
+
+  return (
+    <SignaKitProvider
+      sdkKey="sk_browser_yourOrgId_yourProjectId_random"
+      userId={user?.id ?? getVisitorId()}
+      attributes={attributes}
+    >
+      <App />
+    </SignaKitProvider>
+  )
+}
+```
+
+<Callout type="warning">
+Passing an inline object (`attributes={{ plan: 'pro' }}`) directly on the provider creates a new object on every parent render and re-evaluates every flag each time. Always memoize.
+</Callout>
+
+---
+
+## Tracking conversion events
+
+Use `useSignaKitContext` to get the current `userContext`, then call `trackEvent` on it. Wrap this in a small custom hook so components don't need to know about the context shape.
+
+```ts title="src/lib/use-track.ts"
+import { useSignaKitContext } from '@signakit/flags-react'
+
+export function useTrack() {
+  const { userContext } = useSignaKitContext()
+
+  return function track(eventName: string, properties?: Record<string, unknown>) {
+    if (!userContext) return
+    userContext.trackEvent(eventName, properties)
+  }
+}
+```
+
+```tsx title="src/components/PurchaseButton.tsx"
+import { useTrack } from '../lib/use-track'
+
+export function PurchaseButton({ amount }: { amount: number }) {
+  const track = useTrack()
+
+  function handleClick() {
+    // ... process purchase
+    track('purchase_completed', { value: amount })
+  }
+
+  return <button onClick={handleClick}>Complete purchase</button>
+}
+```
+
+`trackEvent` is fire-and-forget and never throws. If the provider hasn't finished initializing when the event fires, `userContext` will be `null` and the call is silently skipped — no error handling needed.
+
+---
+
+## Handling config fetch failures
+
+By default, if the config fetch fails `SignaKitProvider` fails open: children render, and every `useFlag` call returns `{ enabled: false, loading: false }`. To handle failures explicitly, pass `onError`:
+
+```tsx title="src/main.tsx"
+<SignaKitProvider
+  sdkKey="sk_browser_yourOrgId_yourProjectId_random"
+  userId={visitorId}
+  onError={(reason) => {
+    console.warn('[flags] config fetch failed:', reason)
+    // optional: send to your error tracker
+  }}
+>
+  <App />
+</SignaKitProvider>
+```
+
+Your app keeps working — all flags fall back to off. The `onError` callback is informational only.
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| Using `sk_prod_` key in a SPA | Server key exposed in the browser bundle | Use a browser SDK key from project settings |
+| Inline `attributes` object on the provider | New object on every render re-evaluates all flags | Memoize with `useMemo` |
+| Rendering flag-gated UI before `loading: false` | Flashes the wrong variant during config fetch | Check `loading` or use `loadingFallback` on the provider |
+| Calling `getVisitorId()` inside a component | Generates a new ID on every render if `localStorage` is missing | Call it once outside the component tree (in `main.tsx`) |
+| Changing `userId` on every render | Triggers full re-evaluation on every render | Derive `userId` from stable state or `useMemo` |
+| Using the React SDK in a Next.js server component | Hooks and browser APIs cannot run server-side | Use `@signakit/flags-node` in server components |
+
+---
+
+## Related
+
+- [React SDK reference →](/docs/flags/sdks/react)
+- [Browser SDK reference →](/docs/flags/sdks/browser)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)

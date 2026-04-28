@@ -1,0 +1,408 @@
+---
+title: Next.js Pages Router
+description: Integrate SignaKit feature flags into a Next.js Pages Router application — evaluate flags in getServerSideProps, gate static pages with client-side hydration, and track A/B test conversions via API routes.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Steps, Step } from 'fumadocs-ui/components/steps'
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
+
+# Next.js Pages Router
+
+**SDK:** `@signakit/flags-node`
+**Next.js version:** 13+ (Pages Router)
+
+In the Pages Router there are no server components — every component that renders in the browser is a client component. Flags must therefore be evaluated in data-fetching functions (`getServerSideProps`, `getStaticProps`) and passed down as props. The recommended primary pattern is `getServerSideProps`: it runs per-request on the server, has access to cookies and headers, and keeps your SDK key out of the browser bundle.
+
+---
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Install the SDK
+
+```npm
+npm install @signakit/flags-node
+```
+
+Add your SDK key to `.env.local`:
+
+```bash
+SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
+```
+
+</Step>
+
+<Step>
+
+### Create a module-level singleton
+
+Create the client once so it is shared across all requests in the same process. In Next.js this module is evaluated once per server cold start — the config fetch happens immediately and is resolved by the time the first request arrives.
+
+```ts title="lib/signakit.ts"
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
+
+export const signakit = client
+export const signakitReady = client.onReady()
+```
+
+</Step>
+
+<Step>
+
+### Await `onReady()` in `_app.tsx`
+
+`_app.tsx` is the right place to block on SDK readiness for Pages Router apps. It runs once on the server for every page request, so awaiting `signakitReady` here ensures the config is loaded before any page's `getServerSideProps` runs.
+
+<Callout type="info">
+`signakitReady` is a module-level promise — awaiting it multiple times is free. After the first resolution every subsequent `await` returns immediately.
+</Callout>
+
+```ts title="pages/_app.tsx"
+import type { AppProps } from 'next/app'
+import { signakitReady } from '@/lib/signakit'
+
+// Kick off readiness on module load — resolves once per process cold start
+void signakitReady
+
+export default function App({ Component, pageProps }: AppProps) {
+  return <Component {...pageProps} />
+}
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## Pattern 1 — `getServerSideProps` (recommended)
+
+Use `getServerSideProps` whenever the page is personalized per user, contains a flag-gated feature, or runs an A/B test. It runs on the server on every request, giving you access to cookies, headers, and session data.
+
+### Basic flag gate
+
+```ts title="pages/checkout.tsx"
+import type { GetServerSideProps, InferGetServerSidePropsType } from 'next'
+import { signakit, signakitReady } from '@/lib/signakit'
+import { CheckoutV2 } from '@/components/checkout-v2'
+import { LegacyCheckout } from '@/components/checkout-legacy'
+
+type Props = {
+  showNewCheckout: boolean
+}
+
+export const getServerSideProps: GetServerSideProps<Props> = async (context) => {
+  await signakitReady
+
+  const visitorId = context.req.cookies['visitor_id'] ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const decision = userCtx.decide('checkout-redesign')
+
+  return {
+    props: {
+      showNewCheckout: decision?.variationKey === 'treatment',
+    },
+  }
+}
+
+export default function CheckoutPage({
+  showNewCheckout,
+}: InferGetServerSidePropsType<typeof getServerSideProps>) {
+  return showNewCheckout ? <CheckoutV2 /> : <LegacyCheckout />
+}
+```
+
+### With auth session attributes
+
+If you have an authenticated session, pass its data as attributes so your targeting rules can use them:
+
+```ts title="pages/dashboard.tsx"
+import type { GetServerSideProps } from 'next'
+import { getSession } from '@/lib/auth' // your auth helper
+import { signakit, signakitReady } from '@/lib/signakit'
+
+type Props = {
+  showBetaDashboard: boolean
+}
+
+export const getServerSideProps: GetServerSideProps<Props> = async (context) => {
+  await signakitReady
+
+  const session = await getSession(context.req)
+  if (!session) {
+    return { redirect: { destination: '/login', permanent: false } }
+  }
+
+  const userCtx = signakit.createUserContext(session.user.id, {
+    plan: session.user.plan,
+    country: session.user.country ?? 'unknown',
+    $userAgent: context.req.headers['user-agent'] ?? '',
+  })
+
+  const beta = userCtx.decide('beta-dashboard')
+
+  return {
+    props: {
+      showBetaDashboard: beta?.enabled ?? false,
+    },
+  }
+}
+```
+
+<Callout type="info" title="$userAgent enables bot filtering">
+Passing `$userAgent` as an attribute lets SignaKit detect bots automatically. Bot traffic receives the `off` variation and does not fire exposure events, keeping your experiment data clean.
+</Callout>
+
+### Multiple flags in one request
+
+Evaluate all flags you need in a single `getServerSideProps` call — each `decide()` is a local in-memory operation with no network cost:
+
+```ts title="pages/home.tsx"
+import type { GetServerSideProps, InferGetServerSidePropsType } from 'next'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+type Props = {
+  showNewHero: boolean
+  pricingVariation: string
+}
+
+export const getServerSideProps: GetServerSideProps<Props> = async (context) => {
+  await signakitReady
+
+  const visitorId = context.req.cookies['visitor_id'] ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+
+  const hero = userCtx.decide('homepage-hero-redesign')
+  const pricing = userCtx.decide('pricing-page-experiment')
+
+  return {
+    props: {
+      showNewHero: hero?.enabled ?? false,
+      pricingVariation: pricing?.variationKey ?? 'control',
+    },
+  }
+}
+
+export default function HomePage({
+  showNewHero,
+  pricingVariation,
+}: InferGetServerSidePropsType<typeof getServerSideProps>) {
+  return (
+    <main>
+      {showNewHero ? <HeroV2 /> : <LegacyHero />}
+      <PricingSection variation={pricingVariation} />
+    </main>
+  )
+}
+```
+
+---
+
+## Pattern 2 — `getStaticProps` with client-side hydration
+
+Use this pattern when the page is mostly static and benefits from CDN caching, but you still want per-user flag evaluation after hydration. The static HTML is flag-agnostic; the flag decision is made client-side after the page loads.
+
+<Callout type="warning" title="Caveat: no SSR flag evaluation">
+With `getStaticProps` the server cannot evaluate a per-user flag — it has no request context. The page renders with default (control) state on the server, and the flag is applied on the client after hydration. This can cause a flash of the control variant before the treatment appears. For experiments where flicker is unacceptable, use `getServerSideProps` instead.
+</Callout>
+
+```ts title="pages/blog/[slug].tsx"
+import type { GetStaticProps, GetStaticPaths, InferGetStaticPropsType } from 'next'
+import { useEffect, useState } from 'react'
+
+type Props = {
+  post: { title: string; content: string }
+}
+
+// Static generation — no flag evaluation here
+export const getStaticProps: GetStaticProps<Props> = async ({ params }) => {
+  const post = await fetchPost(params?.slug as string)
+  return { props: { post }, revalidate: 60 }
+}
+
+export const getStaticPaths: GetStaticPaths = async () => {
+  return { paths: [], fallback: 'blocking' }
+}
+
+export default function BlogPost({
+  post,
+}: InferGetStaticPropsType<typeof getStaticProps>) {
+  const [showRelated, setShowRelated] = useState(false)
+
+  useEffect(() => {
+    // Client-side flag evaluation via your own API route (see Pattern 3)
+    fetch('/api/flags?key=blog-related-posts')
+      .then((r) => r.json())
+      .then(({ enabled }) => setShowRelated(enabled))
+  }, [])
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <div dangerouslySetInnerHTML={{ __html: post.content }} />
+      {showRelated && <RelatedPosts />}
+    </article>
+  )
+}
+```
+
+---
+
+## Pattern 3 — API route for client-side evaluation
+
+When you need to expose a flag decision to client-side JavaScript (e.g. for the `getStaticProps` pattern above), create a thin API route that runs the SDK server-side and returns the result. This keeps the SDK key and `@signakit/flags-node` out of the browser bundle.
+
+```ts title="pages/api/flags.ts"
+import type { NextApiRequest, NextApiResponse } from 'next'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+type Response = {
+  enabled: boolean
+  variationKey: string | null
+}
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<Response>
+) {
+  await signakitReady
+
+  const flagKey = req.query.key as string
+  if (!flagKey) {
+    return res.status(400).json({ enabled: false, variationKey: null })
+  }
+
+  const visitorId = req.cookies['visitor_id'] ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const decision = userCtx.decide(flagKey)
+
+  // Cache for a short window to reduce repeated evaluations
+  res.setHeader('Cache-Control', 'private, max-age=30')
+
+  return res.json({
+    enabled: decision?.enabled ?? false,
+    variationKey: decision?.variationKey ?? null,
+  })
+}
+```
+
+---
+
+## Tracking A/B test conversions
+
+Track conversions via an API route. This keeps the SDK server-side and ensures the same `userId` used during bucketing is used when recording the conversion.
+
+```ts title="pages/api/track.ts"
+import type { NextApiRequest, NextApiResponse } from 'next'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
+  if (req.method !== 'POST') {
+    return res.status(405).end()
+  }
+
+  await signakitReady
+
+  const { eventName, value } = req.body as { eventName: string; value?: number }
+  const visitorId = req.cookies['visitor_id'] ?? 'anonymous'
+
+  const userCtx = signakit.createUserContext(visitorId)
+  await userCtx.trackEvent(eventName, value !== undefined ? { value } : undefined)
+
+  return res.status(204).end()
+}
+```
+
+Call the API route from a client component after a conversion:
+
+```ts title="components/purchase-button.tsx"
+export function PurchaseButton({ amount }: { amount: number }) {
+  async function handlePurchase() {
+    // ... your purchase logic
+
+    await fetch('/api/track', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventName: 'purchase_completed', value: amount }),
+    })
+  }
+
+  return <button onClick={handlePurchase}>Complete purchase</button>
+}
+```
+
+<Callout type="info" title="Use the same userId for exposure and conversion">
+The `visitor_id` cookie must be the same value that was used when `decide()` was called during `getServerSideProps`. If a user is authenticated, use their stable account ID in both places so exposures and conversions are correctly joined in the experiment results.
+</Callout>
+
+---
+
+## Redirecting based on a flag
+
+Return a `redirect` from `getServerSideProps` to send users to a different page based on their variation:
+
+```ts title="pages/index.tsx"
+import type { GetServerSideProps } from 'next'
+import { signakit, signakitReady } from '@/lib/signakit'
+
+export const getServerSideProps: GetServerSideProps = async (context) => {
+  await signakitReady
+
+  const visitorId = context.req.cookies['visitor_id'] ?? 'anonymous'
+  const userCtx = signakit.createUserContext(visitorId)
+  const redesign = userCtx.decide('homepage-redesign')
+
+  if (redesign?.variationKey === 'treatment') {
+    return {
+      redirect: {
+        destination: '/homepage-v2',
+        permanent: false,
+      },
+    }
+  }
+
+  return { props: {} }
+}
+
+export default function HomePage() {
+  return <LegacyHomePage />
+}
+```
+
+<Callout type="warning" title="Redirects add a round-trip">
+A server-side redirect adds a network round-trip before the page renders. For high-traffic routes, prefer rendering both variants in the same page and toggling visibility via props rather than redirecting.
+</Callout>
+
+---
+
+## Anti-patterns
+
+| Pattern | Problem | Fix |
+|---|---|---|
+| `createInstance()` inside `getServerSideProps` | Re-fetches config on every request; per-instance dedup means every request fires a fresh exposure | Create the client once in `lib/signakit.ts` and import the singleton |
+| Importing `@signakit/flags-node` in a page component | Bundles server-only code client-side; SDK key leaks to the browser | Evaluate flags in `getServerSideProps` and pass the result as a prop |
+| Calling `decide()` before `await signakitReady` | Returns `null` if config hasn't loaded; user gets the control/default state silently | Always `await signakitReady` at the top of your data-fetching function |
+| Using `getStaticProps` for user-targeted A/B tests | No request context at build time — every user gets the same statically generated variation | Use `getServerSideProps` for personalized or experiment pages |
+| Different `userId` for exposure vs. conversion | Experiment results cannot join the two events; conversion rate appears lower than reality | Read the same `visitor_id` cookie (or session ID) in both `getServerSideProps` and `/api/track` |
+| `decideAll()` in a high-traffic `getServerSideProps` | Fires an `$exposure` event for every flag on every request — unexpected event volume | Use `decide('specific-flag')` and only evaluate flags the page actually needs |
+
+---
+
+## Related
+
+- [Node.js SDK reference →](/docs/flags/sdks/node)
+- [Next.js App Router guide →](/docs/flags/guides/nextjs-app-router)
+- [Next.js Middleware guide →](/docs/flags/guides/nextjs-middleware)
+- [Concepts: A/B Testing →](/docs/flags/concepts/ab-testing)
+- [Concepts: Targeted Delivery →](/docs/flags/concepts/targeted-delivery)
