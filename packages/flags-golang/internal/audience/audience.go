@@ -10,16 +10,16 @@
 package audience
 
 import (
-	"github.com/signakit/flags-golang/signakit"
+	"github.com/signakit/flags-golang/internal/types"
 )
 
 // MatchesAudiences returns true iff the user matches the rule's audience set
 // according to matchType. Empty / nil audiences always match.
-func MatchesAudiences(audiences []signakit.ConfigRuleAudience, matchType signakit.AudienceMatchType, attrs signakit.UserAttributes) bool {
+func MatchesAudiences(audiences []types.ConfigRuleAudience, matchType types.AudienceMatchType, attrs types.UserAttributes) bool {
 	if len(audiences) == 0 {
 		return true
 	}
-	if matchType == signakit.AudienceMatchAny {
+	if matchType == types.AudienceMatchAny {
 		for _, a := range audiences {
 			if matchesAudience(a, attrs) {
 				return true
@@ -36,7 +36,7 @@ func MatchesAudiences(audiences []signakit.ConfigRuleAudience, matchType signaki
 	return true
 }
 
-func matchesAudience(a signakit.ConfigRuleAudience, attrs signakit.UserAttributes) bool {
+func matchesAudience(a types.ConfigRuleAudience, attrs types.UserAttributes) bool {
 	for _, c := range a.Conditions {
 		if !MatchesCondition(c, attrs) {
 			return false
@@ -46,7 +46,7 @@ func matchesAudience(a signakit.ConfigRuleAudience, attrs signakit.UserAttribute
 }
 
 // MatchesCondition evaluates a single condition. Exported for testing.
-func MatchesCondition(cond signakit.AudienceCondition, attrs signakit.UserAttributes) bool {
+func MatchesCondition(cond types.AudienceCondition, attrs types.UserAttributes) bool {
 	if attrs == nil {
 		return false
 	}
@@ -56,23 +56,23 @@ func MatchesCondition(cond signakit.AudienceCondition, attrs signakit.UserAttrib
 	}
 
 	switch cond.Operator {
-	case signakit.OpEquals:
+	case types.OpEquals:
 		return scalarEquals(userValue, cond.Value)
-	case signakit.OpNotEquals:
+	case types.OpNotEquals:
 		return !scalarEquals(userValue, cond.Value)
-	case signakit.OpGreaterThan:
+	case types.OpGreaterThan:
 		a, b, ok := bothNumbers(userValue, cond.Value)
 		return ok && a > b
-	case signakit.OpLessThan:
+	case types.OpLessThan:
 		a, b, ok := bothNumbers(userValue, cond.Value)
 		return ok && a < b
-	case signakit.OpGreaterThanOrEqual:
+	case types.OpGreaterThanOrEqual:
 		a, b, ok := bothNumbers(userValue, cond.Value)
 		return ok && a >= b
-	case signakit.OpLessThanOrEqual:
+	case types.OpLessThanOrEqual:
 		a, b, ok := bothNumbers(userValue, cond.Value)
 		return ok && a <= b
-	case signakit.OpIn:
+	case types.OpIn:
 		list, ok := toAnyList(cond.Value)
 		if !ok {
 			return false
@@ -83,7 +83,7 @@ func MatchesCondition(cond signakit.AudienceCondition, attrs signakit.UserAttrib
 			}
 		}
 		return false
-	case signakit.OpNotIn:
+	case types.OpNotIn:
 		list, ok := toAnyList(cond.Value)
 		if !ok {
 			// TS returns true when value isn't an array.
@@ -95,9 +95,9 @@ func MatchesCondition(cond signakit.AudienceCondition, attrs signakit.UserAttrib
 			}
 		}
 		return true
-	case signakit.OpContains:
+	case types.OpContains:
 		return contains(userValue, cond.Value)
-	case signakit.OpNotContains:
+	case types.OpNotContains:
 		// TS returns true when types don't match.
 		us, usOK := userValue.(string)
 		vs, vsOK := cond.Value.(string)

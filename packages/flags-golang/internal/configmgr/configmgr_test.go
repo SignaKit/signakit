@@ -1,4 +1,4 @@
-package configmgr
+package configmgr_test
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/signakit/flags-golang/internal/configmgr"
 	"github.com/signakit/flags-golang/signakit"
 )
 
@@ -29,7 +30,7 @@ func TestParseSDKKey(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			org, proj, env, err := ParseSDKKey(tc.key)
+			org, proj, env, err := configmgr.ParseSDKKey(tc.key)
 			if tc.wantError {
 				if err == nil {
 					t.Errorf("expected error")
@@ -62,7 +63,7 @@ func TestManagerFetchAnd304(t *testing.T) {
 	}))
 	defer server.Close()
 
-	m := New(Options{
+	m := configmgr.New(configmgr.Options{
 		OrgID: "org", ProjectID: "proj",
 		Environment: signakit.EnvironmentDevelopment,
 		BaseURL:     server.URL,

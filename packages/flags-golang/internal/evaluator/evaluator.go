@@ -15,13 +15,13 @@ package evaluator
 import (
 	"github.com/signakit/flags-golang/internal/audience"
 	"github.com/signakit/flags-golang/internal/hasher"
-	"github.com/signakit/flags-golang/signakit"
+	"github.com/signakit/flags-golang/internal/types"
 )
 
 // EvaluateFlag evaluates a single flag for a user. Returns nil iff the flag is
 // archived (the SDK omits archived flags from decideAll).
-func EvaluateFlag(flag signakit.ConfigFlag, userID string, attrs signakit.UserAttributes) *signakit.Decision {
-	if flag.Status == signakit.FlagStatusArchived {
+func EvaluateFlag(flag types.ConfigFlag, userID string, attrs types.UserAttributes) *types.Decision {
+	if flag.Status == types.FlagStatusArchived {
 		return nil
 	}
 
@@ -34,7 +34,7 @@ func EvaluateFlag(flag signakit.ConfigFlag, userID string, attrs signakit.UserAt
 		if entry := findAllowlistEntry(rule.Allowlist, userID); entry != nil {
 			rt := rule.RuleType
 			rk := rule.RuleKey
-			return &signakit.Decision{
+			return &types.Decision{
 				FlagKey:      flag.Key,
 				VariationKey: entry.Variation,
 				Enabled:      entry.Variation != "off",
@@ -63,7 +63,7 @@ func EvaluateFlag(flag signakit.ConfigFlag, userID string, attrs signakit.UserAt
 
 		rt := rule.RuleType
 		rk := rule.RuleKey
-		return &signakit.Decision{
+		return &types.Decision{
 			FlagKey:      flag.Key,
 			VariationKey: variation,
 			Enabled:      variation != "off",
@@ -76,7 +76,7 @@ func EvaluateFlag(flag signakit.ConfigFlag, userID string, attrs signakit.UserAt
 	// Default allocation.
 	defaultBucket := hasher.HashForDefault(flag.Salt, userID)
 	if variation, ok := findVariationInRanges(flag.Allocation, defaultBucket); ok {
-		return &signakit.Decision{
+		return &types.Decision{
 			FlagKey:      flag.Key,
 			VariationKey: variation,
 			Enabled:      variation != "off",
@@ -90,8 +90,8 @@ func EvaluateFlag(flag signakit.ConfigFlag, userID string, attrs signakit.UserAt
 }
 
 // EvaluateAll evaluates every flag in cfg, omitting archived flags.
-func EvaluateAll(cfg *signakit.ProjectConfig, userID string, attrs signakit.UserAttributes) signakit.Decisions {
-	out := make(signakit.Decisions, len(cfg.Flags))
+func EvaluateAll(cfg *types.ProjectConfig, userID string, attrs types.UserAttributes) types.Decisions {
+	out := make(types.Decisions, len(cfg.Flags))
 	for _, flag := range cfg.Flags {
 		if d := EvaluateFlag(flag, userID, attrs); d != nil {
 			out[flag.Key] = *d
@@ -100,8 +100,8 @@ func EvaluateAll(cfg *signakit.ProjectConfig, userID string, attrs signakit.User
 	return out
 }
 
-func offDecision(flag signakit.ConfigFlag, ruleKey *string, ruleType *signakit.RuleType) *signakit.Decision {
-	return &signakit.Decision{
+func offDecision(flag types.ConfigFlag, ruleKey *string, ruleType *types.RuleType) *types.Decision {
+	return &types.Decision{
 		FlagKey:      flag.Key,
 		VariationKey: "off",
 		Enabled:      false,
@@ -111,7 +111,7 @@ func offDecision(flag signakit.ConfigFlag, ruleKey *string, ruleType *signakit.R
 	}
 }
 
-func findAllowlistEntry(list []signakit.AllowlistEntry, userID string) *signakit.AllowlistEntry {
+func findAllowlistEntry(list []types.AllowlistEntry, userID string) *types.AllowlistEntry {
 	for i := range list {
 		if list[i].UserID == userID {
 			return &list[i]
@@ -120,7 +120,7 @@ func findAllowlistEntry(list []signakit.AllowlistEntry, userID string) *signakit
 	return nil
 }
 
-func findVariationInRanges(alloc signakit.VariationAllocation, bucket int) (string, bool) {
+func findVariationInRanges(alloc types.VariationAllocation, bucket int) (string, bool) {
 	for _, r := range alloc.Ranges {
 		if bucket >= r.Start && bucket <= r.End {
 			return r.Variation, true
@@ -129,7 +129,7 @@ func findVariationInRanges(alloc signakit.VariationAllocation, bucket int) (stri
 	return "", false
 }
 
-func resolveVariables(flag signakit.ConfigFlag, variationKey string) map[string]any {
+func resolveVariables(flag types.ConfigFlag, variationKey string) map[string]any {
 	if len(flag.Variables) == 0 {
 		return map[string]any{}
 	}
