@@ -347,6 +347,10 @@ import {
 } from '@signakit/flags-node'
 ```
 
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](https://github.com/SignaKit/signakit/blob/main/CONTRIBUTING.md) for development setup, test conventions, and PR guidelines.
+
 ## License
 
 MIT
