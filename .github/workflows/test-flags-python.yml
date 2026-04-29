@@ -1,0 +1,40 @@
+name: Test — flags-python SDK
+
+on:
+  pull_request:
+    paths:
+      - 'packages/flags-python/**'
+      - '.github/workflows/test-flags-python.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, lint & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/flags-python
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: packages/flags-python/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Type check
+        run: mypy
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Run tests
+        run: pytest
