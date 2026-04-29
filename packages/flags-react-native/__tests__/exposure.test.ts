@@ -6,8 +6,8 @@
  */
 
 import { SignaKitClient } from '../src/client'
-import type { ProjectConfig } from '../src/types'
 import { SIGNAKIT_EVENTS_URL } from '../src/constants'
+import type { ProjectConfig } from '../src/types'
 
 function makeConfig(): ProjectConfig {
   return {
