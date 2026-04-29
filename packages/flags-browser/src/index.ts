@@ -22,4 +22,5 @@ export type {
   TrackEventOptions,
   VariableValue,
   FlagVariable,
+  RuleType,
 } from './types'
