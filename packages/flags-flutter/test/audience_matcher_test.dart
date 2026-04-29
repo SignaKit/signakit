@@ -149,7 +149,7 @@ void main() {
   });
 
   test('matchesAudience returns true for empty conditions', () {
-    final audience = ConfigRuleAudience(conditions: []);
+    const audience = ConfigRuleAudience(conditions: []);
     expect(matchesAudience(audience, {}), isTrue);
   });
 

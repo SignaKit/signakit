@@ -1,6 +1,7 @@
 /// SignaKit Feature Flags SDK types.
 ///
 /// Mirrors `packages/flags-node/src/types.ts`.
+library;
 
 /// Environment derived from the SDK key.
 enum Environment {
@@ -90,7 +91,7 @@ class FlagVariable {
     return FlagVariable(
       key: json['key']! as String,
       type: json['type']! as String,
-      defaultValue: json['defaultValue']! as VariableValue,
+      defaultValue: json['defaultValue']!,
     );
   }
 }
@@ -106,11 +107,9 @@ class Variation {
     final rawVars = json['variables'] as Map<String, Object?>?;
     return Variation(
       key: json['key']! as String,
-      variables: rawVars == null
-          ? null
-          : rawVars.map(
-              (k, v) => MapEntry(k, v! as VariableValue),
-            ),
+      variables: rawVars?.map(
+        (k, v) => MapEntry(k, v!),
+      ),
     );
   }
 }

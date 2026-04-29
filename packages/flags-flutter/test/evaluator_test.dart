@@ -265,7 +265,7 @@ void main() {
       variations: [
         const Variation(key: 'off'),
         const Variation(key: 'v1'), // inherits all defaults
-        Variation(key: 'v2', variables: {'color': 'blue', 'count': 5}),
+        const Variation(key: 'v2', variables: {'color': 'blue', 'count': 5}),
       ],
       variables: const [
         FlagVariable(key: 'color', type: 'string', defaultValue: 'red'),
@@ -290,7 +290,7 @@ void main() {
       salt: 'vars-salt',
       variations: [
         const Variation(key: 'off'),
-        Variation(key: 'v2', variables: {'color': 'blue', 'count': 5}),
+        const Variation(key: 'v2', variables: {'color': 'blue', 'count': 5}),
       ],
       variables: const [
         FlagVariable(key: 'color', type: 'string', defaultValue: 'red'),

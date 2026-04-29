@@ -2,7 +2,6 @@
 /// SKIP `$exposure` events. This is a hard cross-SDK requirement.
 library;
 
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
