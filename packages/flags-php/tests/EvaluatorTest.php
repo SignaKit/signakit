@@ -6,12 +6,9 @@ namespace SignaKit\FlagsPhp\Tests;
 
 use PHPUnit\Framework\TestCase;
 use SignaKit\FlagsPhp\Evaluator;
-use SignaKit\FlagsPhp\Hasher;
+use SignaKit\FlagsPhp\Types\Decision;
 use SignaKit\FlagsPhp\Types\ProjectConfig;
 
-/**
- * @covers \SignaKit\FlagsPhp\Evaluator
- */
 final class EvaluatorTest extends TestCase
 {
     // -------------------------------------------------------------------------
@@ -19,261 +16,332 @@ final class EvaluatorTest extends TestCase
     // -------------------------------------------------------------------------
 
     /**
+     * Build a minimal valid flag array. Defaults: active, running, all users → 'on'.
+     *
      * @param array<string, mixed> $overrides
      * @return array<string, mixed>
      */
-    private function makeFlag(array $overrides = []): array
+    private function makeFlag(string $key, array $overrides = []): array
     {
         return array_merge([
-            'id'         => 'flag-uuid',
-            'key'        => 'test-flag',
+            'id'         => "flag_{$key}",
+            'key'        => $key,
             'status'     => 'active',
             'running'    => true,
-            'salt'       => 'test-salt',
-            'variations' => [['key' => 'control'], ['key' => 'treatment']],
-            'allocation' => [
-                'ranges' => [
-                    ['variation' => 'control',   'start' => 0,    'end' => 4999],
-                    ['variation' => 'treatment', 'start' => 5000, 'end' => 9999],
-                ],
-            ],
-            'rules' => [],
+            'salt'       => "{$key}-salt",
+            'variations' => [['key' => 'off'], ['key' => 'on']],
+            'allocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
         ], $overrides);
     }
 
     // -------------------------------------------------------------------------
-    // Archived flag
+    // Status / running checks
     // -------------------------------------------------------------------------
 
-    public function testArchivedFlagReturnsNull(): void
+    public function test_returns_null_for_archived_flags(): void
     {
-        $flag   = $this->makeFlag(['status' => 'archived']);
-        $result = Evaluator::evaluateFlag($flag, 'user-1');
-
-        $this->assertNull($result);
+        $flag = $this->makeFlag('archived', ['status' => 'archived']);
+        $this->assertNull(Evaluator::evaluateFlag($flag, 'user-1'));
     }
 
-    // -------------------------------------------------------------------------
-    // Stopped flag
-    // -------------------------------------------------------------------------
-
-    public function testStoppedFlagReturnsOff(): void
+    public function test_returns_off_decision_for_stopped_flags(): void
     {
-        $flag   = $this->makeFlag(['running' => false]);
+        $flag   = $this->makeFlag('disabled', ['running' => false]);
         $result = Evaluator::evaluateFlag($flag, 'user-1');
 
         $this->assertNotNull($result);
-        $this->assertSame('off',      $result->variationKey);
+        $this->assertSame('off', $result->variationKey);
         $this->assertFalse($result->enabled);
         $this->assertNull($result->ruleKey);
+        $this->assertNull($result->ruleType);
     }
 
     // -------------------------------------------------------------------------
-    // Allowlist override
+    // Allowlist
     // -------------------------------------------------------------------------
 
-    public function testAllowlistOverrideBypassesTraffic(): void
+    public function test_returns_allowlisted_variation_for_a_listed_user(): void
     {
-        $flag = $this->makeFlag([
-            'rules' => [
+        $flag = $this->makeFlag('allowlist', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
                 [
-                    'ruleKey'             => 'rule-0',
-                    'ruleType'            => 'ab-test',
-                    'trafficPercentage'   => 0,    // 0% traffic — no one would normally be bucketed
-                    'variationAllocation' => ['ranges' => []],
-                    'audiences'           => [],
-                    'audienceMatchType'   => 'any',
-                    'allowlist'           => [['userId' => 'allowed-user', 'variation' => 'treatment']],
+                    'ruleKey'             => 'rule-qa',
+                    'ruleType'            => 'targeted',
+                    'trafficPercentage'   => 0,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                    'allowlist'           => [
+                        ['userId' => 'qa-user',     'variation' => 'on'],
+                        ['userId' => 'qa-off-user', 'variation' => 'off'],
+                    ],
                 ],
             ],
         ]);
 
-        $result = Evaluator::evaluateFlag($flag, 'allowed-user');
-
+        $result = Evaluator::evaluateFlag($flag, 'qa-user');
         $this->assertNotNull($result);
-        $this->assertSame('treatment', $result->variationKey);
-        $this->assertTrue($result->enabled);
-        $this->assertSame('rule-0', $result->ruleKey);
+        $this->assertSame('on', $result->variationKey);
+        $this->assertSame('rule-qa', $result->ruleKey);
+        $this->assertSame('targeted', $result->ruleType);
     }
 
-    public function testAllowlistDoesNotMatchOtherUsers(): void
+    public function test_returns_allowlisted_off_variation_when_explicitly_set(): void
     {
-        $flag = $this->makeFlag([
-            'rules' => [
+        $flag = $this->makeFlag('allowlist', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
                 [
-                    'ruleKey'             => 'rule-0',
-                    'ruleType'            => 'ab-test',
-                    'trafficPercentage'   => 100,
-                    'variationAllocation' => [
-                        'ranges' => [
-                            ['variation' => 'control', 'start' => 0, 'end' => 9999],
-                        ],
+                    'ruleKey'             => 'rule-qa',
+                    'ruleType'            => 'targeted',
+                    'trafficPercentage'   => 0,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                    'allowlist'           => [
+                        ['userId' => 'qa-off-user', 'variation' => 'off'],
                     ],
-                    'audiences'           => [],
-                    'audienceMatchType'   => 'any',
-                    'allowlist'           => [['userId' => 'special-user', 'variation' => 'treatment']],
                 ],
             ],
         ]);
 
-        $result = Evaluator::evaluateFlag($flag, 'normal-user');
-
+        $result = Evaluator::evaluateFlag($flag, 'qa-off-user');
         $this->assertNotNull($result);
-        // 'normal-user' should go through traffic and get 'control' (not treatment from allowlist)
-        $this->assertSame('control', $result->variationKey);
+        $this->assertSame('off', $result->variationKey);
+        $this->assertSame('rule-qa', $result->ruleKey);
     }
 
-    // -------------------------------------------------------------------------
-    // Audience matching
-    // -------------------------------------------------------------------------
-
-    public function testAudienceFilterExcludesNonMatchingUser(): void
+    public function test_falls_through_to_default_allocation_for_non_allowlisted_users(): void
     {
-        $flag = $this->makeFlag([
-            'rules' => [
+        $flag = $this->makeFlag('allowlist', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
                 [
-                    'ruleKey'             => 'rule-premium',
-                    'ruleType'            => 'ab-test',
-                    'trafficPercentage'   => 100,
-                    'variationAllocation' => [
-                        'ranges' => [['variation' => 'treatment', 'start' => 0, 'end' => 9999]],
+                    'ruleKey'             => 'rule-qa',
+                    'ruleType'            => 'targeted',
+                    'trafficPercentage'   => 0,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                    'allowlist'           => [
+                        ['userId' => 'qa-user', 'variation' => 'on'],
                     ],
-                    'audiences'           => [
-                        ['conditions' => [['attribute' => 'plan', 'operator' => 'equals', 'value' => 'premium']]],
-                    ],
-                    'audienceMatchType'   => 'any',
-                    'allowlist'           => [],
                 ],
             ],
         ]);
 
-        // free-plan user should not match the rule → falls to default allocation
-        $result = Evaluator::evaluateFlag($flag, 'free-user', ['plan' => 'free']);
+        $result = Evaluator::evaluateFlag($flag, 'random-user');
+        // trafficPercentage=0 → no rule match; default allocation returns 'off'
         $this->assertNotNull($result);
-        $this->assertNull($result->ruleKey); // used default allocation
-    }
-
-    public function testAudienceFilterIncludesMatchingUser(): void
-    {
-        $flag = $this->makeFlag([
-            'rules' => [
-                [
-                    'ruleKey'             => 'rule-premium',
-                    'ruleType'            => 'ab-test',
-                    'trafficPercentage'   => 100,
-                    'variationAllocation' => [
-                        'ranges' => [['variation' => 'treatment', 'start' => 0, 'end' => 9999]],
-                    ],
-                    'audiences'           => [
-                        ['conditions' => [['attribute' => 'plan', 'operator' => 'equals', 'value' => 'premium']]],
-                    ],
-                    'audienceMatchType'   => 'any',
-                    'allowlist'           => [],
-                ],
-            ],
-        ]);
-
-        $result = Evaluator::evaluateFlag($flag, 'premium-user', ['plan' => 'premium']);
-        $this->assertNotNull($result);
-        $this->assertSame('rule-premium', $result->ruleKey);
-        $this->assertSame('treatment', $result->variationKey);
+        $this->assertSame('off', $result->variationKey);
+        $this->assertNull($result->ruleKey);
     }
 
     // -------------------------------------------------------------------------
     // Traffic allocation
     // -------------------------------------------------------------------------
 
-    public function testZeroPercentTrafficExcludesAllUsers(): void
+    public function test_places_all_users_in_traffic_when_trafficPercentage_is_100(): void
     {
-        $flag = $this->makeFlag([
+        $flag = $this->makeFlag('full-traffic', [
             'rules' => [
                 [
-                    'ruleKey'             => 'rule-0',
+                    'ruleKey'             => 'rule-all',
                     'ruleType'            => 'ab-test',
-                    'trafficPercentage'   => 0,
-                    'variationAllocation' => ['ranges' => [['variation' => 'treatment', 'start' => 0, 'end' => 9999]]],
-                    'audiences'           => [],
-                    'audienceMatchType'   => 'any',
-                    'allowlist'           => [],
+                    'trafficPercentage'   => 100,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
                 ],
             ],
         ]);
 
-        // With 0% traffic no one enters the rule; check with several users
-        foreach (['user-a', 'user-b', 'user-c'] as $userId) {
-            $result = Evaluator::evaluateFlag($flag, $userId);
-            $this->assertNotNull($result);
-            $this->assertNull($result->ruleKey, "User {$userId} should fall to default, not rule-0");
-        }
+        $result = Evaluator::evaluateFlag($flag, 'any-user');
+        $this->assertNotNull($result);
+        $this->assertSame('on', $result->variationKey);
+        $this->assertSame('rule-all', $result->ruleKey);
+    }
+
+    public function test_places_no_users_in_traffic_when_trafficPercentage_is_0(): void
+    {
+        $flag = $this->makeFlag('zero-traffic', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
+                [
+                    'ruleKey'             => 'rule-none',
+                    'ruleType'            => 'ab-test',
+                    'trafficPercentage'   => 0,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                ],
+            ],
+        ]);
+
+        $result = Evaluator::evaluateFlag($flag, 'any-user');
+        // No traffic → falls through to default → 'off'
+        $this->assertNotNull($result);
+        $this->assertSame('off', $result->variationKey);
+        $this->assertNull($result->ruleKey);
+    }
+
+    // -------------------------------------------------------------------------
+    // Audience targeting
+    // -------------------------------------------------------------------------
+
+    public function test_matches_rule_for_user_whose_attributes_satisfy_the_audience(): void
+    {
+        $flag = $this->makeFlag('targeted', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
+                [
+                    'ruleKey'             => 'rule-premium',
+                    'ruleType'            => 'ab-test',
+                    'audienceMatchType'   => 'any',
+                    'audiences'           => [
+                        ['conditions' => [['attribute' => 'plan', 'operator' => 'equals', 'value' => 'premium']]],
+                    ],
+                    'trafficPercentage'   => 100,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                ],
+            ],
+        ]);
+
+        $result = Evaluator::evaluateFlag($flag, 'premium-user', ['plan' => 'premium']);
+        $this->assertNotNull($result);
+        $this->assertSame('on', $result->variationKey);
+        $this->assertSame('rule-premium', $result->ruleKey);
+    }
+
+    public function test_falls_through_to_default_for_user_who_does_not_match_audience(): void
+    {
+        $flag = $this->makeFlag('targeted', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
+                [
+                    'ruleKey'             => 'rule-premium',
+                    'ruleType'            => 'ab-test',
+                    'audienceMatchType'   => 'any',
+                    'audiences'           => [
+                        ['conditions' => [['attribute' => 'plan', 'operator' => 'equals', 'value' => 'premium']]],
+                    ],
+                    'trafficPercentage'   => 100,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                ],
+            ],
+        ]);
+
+        $result = Evaluator::evaluateFlag($flag, 'free-user', ['plan' => 'free']);
+        $this->assertNotNull($result);
+        $this->assertSame('off', $result->variationKey);
+        $this->assertNull($result->ruleKey);
+    }
+
+    public function test_falls_through_to_default_when_user_has_no_attributes(): void
+    {
+        $flag = $this->makeFlag('targeted', [
+            'allocation' => ['ranges' => [['variation' => 'off', 'start' => 0, 'end' => 9999]]],
+            'rules'      => [
+                [
+                    'ruleKey'             => 'rule-premium',
+                    'ruleType'            => 'ab-test',
+                    'audienceMatchType'   => 'any',
+                    'audiences'           => [
+                        ['conditions' => [['attribute' => 'plan', 'operator' => 'equals', 'value' => 'premium']]],
+                    ],
+                    'trafficPercentage'   => 100,
+                    'variationAllocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+                ],
+            ],
+        ]);
+
+        $result = Evaluator::evaluateFlag($flag, 'attr-less-user');
+        $this->assertNotNull($result);
+        $this->assertSame('off', $result->variationKey);
+        $this->assertNull($result->ruleKey);
     }
 
     // -------------------------------------------------------------------------
     // Default allocation
     // -------------------------------------------------------------------------
 
-    public function testDefaultAllocationUsedWhenNoRulesMatch(): void
+    public function test_uses_default_allocation_when_no_rules_exist(): void
     {
-        $flag   = $this->makeFlag(['rules' => []]);
-        $result = Evaluator::evaluateFlag($flag, 'user-default');
+        $flag   = $this->makeFlag('no-rules', [
+            'allocation' => ['ranges' => [['variation' => 'on', 'start' => 0, 'end' => 9999]]],
+        ]);
+        $result = Evaluator::evaluateFlag($flag, 'user-1');
 
         $this->assertNotNull($result);
+        $this->assertSame('on', $result->variationKey);
         $this->assertNull($result->ruleKey);
-        $this->assertTrue($result->enabled);
-        $this->assertContains($result->variationKey, ['control', 'treatment']);
+        $this->assertNull($result->ruleType);
     }
 
-    public function testDefaultAllocationIsDeterministic(): void
+    public function test_returns_null_when_default_allocation_ranges_are_empty(): void
     {
-        $flag    = $this->makeFlag(['rules' => []]);
-        $result1 = Evaluator::evaluateFlag($flag, 'consistent-user');
-        $result2 = Evaluator::evaluateFlag($flag, 'consistent-user');
+        // PHP: resolveVariation returns null → evaluateFlag returns null (no off fallback)
+        $flag   = $this->makeFlag('empty-alloc', ['allocation' => ['ranges' => []]]);
+        $result = Evaluator::evaluateFlag($flag, 'user-1');
+        $this->assertNull($result);
+    }
 
-        $this->assertNotNull($result1);
-        $this->assertNotNull($result2);
-        $this->assertSame($result1->variationKey, $result2->variationKey);
+    // -------------------------------------------------------------------------
+    // Determinism
+    // -------------------------------------------------------------------------
+
+    public function test_always_assigns_the_same_variation_to_the_same_user(): void
+    {
+        $flag = $this->makeFlag('determinism', [
+            'allocation' => [
+                'ranges' => [
+                    ['variation' => 'off', 'start' => 0,    'end' => 4999],
+                    ['variation' => 'on',  'start' => 5000, 'end' => 9999],
+                ],
+            ],
+        ]);
+
+        $variations = array_map(
+            fn() => Evaluator::evaluateFlag($flag, 'user-stable')?->variationKey,
+            range(0, 9),
+        );
+
+        $this->assertCount(1, array_unique(array_filter($variations)));
     }
 
     // -------------------------------------------------------------------------
     // evaluateAllFlags
     // -------------------------------------------------------------------------
 
-    public function testEvaluateAllFlagsOmitsArchivedFlags(): void
+    public function test_returns_decisions_for_all_non_archived_flags(): void
     {
         $config = new ProjectConfig(
-            projectId:      '123',
-            environmentKey: 'production',
-            sdkKey:         'sk_prod_org_123_xxxx',
+            projectId:      'p1',
+            environmentKey: 'development',
+            sdkKey:         'sk_dev_org1_p1_xxx',
             version:        1,
             flags:          [
-                $this->makeFlag(['key' => 'active-flag', 'status' => 'active']),
-                $this->makeFlag(['key' => 'archived-flag', 'status' => 'archived']),
+                $this->makeFlag('active-a'),
+                $this->makeFlag('active-b'),
+                $this->makeFlag('archived-c', ['status' => 'archived']),
             ],
         );
 
         $decisions = Evaluator::evaluateAllFlags($config, 'user-1');
 
-        $this->assertArrayHasKey('active-flag', $decisions);
-        $this->assertArrayNotHasKey('archived-flag', $decisions);
+        $this->assertCount(2, $decisions);
+        $this->assertArrayHasKey('active-a', $decisions);
+        $this->assertArrayHasKey('active-b', $decisions);
+        $this->assertArrayNotHasKey('archived-c', $decisions);
     }
 
-    public function testEvaluateAllFlagsReturnsMappedByFlagKey(): void
+    public function test_includes_flagKey_on_each_decision(): void
     {
         $config = new ProjectConfig(
-            projectId:      '123',
-            environmentKey: 'production',
-            sdkKey:         'sk_prod_org_123_xxxx',
+            projectId:      'p1',
+            environmentKey: 'development',
+            sdkKey:         'sk_dev_org1_p1_xxx',
             version:        1,
             flags:          [
-                $this->makeFlag(['key' => 'flag-one']),
-                $this->makeFlag(['key' => 'flag-two']),
+                $this->makeFlag('active-a'),
+                $this->makeFlag('active-b'),
             ],
         );
 
         $decisions = Evaluator::evaluateAllFlags($config, 'user-1');
 
-        $this->assertArrayHasKey('flag-one', $decisions);
-        $this->assertArrayHasKey('flag-two', $decisions);
-        $this->assertSame('flag-one', $decisions['flag-one']->flagKey);
-        $this->assertSame('flag-two', $decisions['flag-two']->flagKey);
+        $this->assertSame('active-a', $decisions['active-a']->flagKey);
+        $this->assertSame('active-b', $decisions['active-b']->flagKey);
     }
 }
