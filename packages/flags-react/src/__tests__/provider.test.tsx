@@ -10,8 +10,8 @@ import React from 'react'
 import { render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { SignaKitProvider, SignaKitContext } from '../provider'
-import type { SignaKitContextValue } from '../provider'
 import { createInstance } from '@signakit/flags-browser'
+import type { SignaKitContextValue } from '../provider'
 
 vi.mock('@signakit/flags-browser', () => ({
   createInstance: vi.fn(),
