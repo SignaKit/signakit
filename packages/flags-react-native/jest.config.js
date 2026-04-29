@@ -7,4 +7,7 @@ module.exports = {
   transform: {
     '^.+\\.(ts|tsx)$': ['ts-jest', { tsconfig: { jsx: 'react-jsx' } }],
   },
+  setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
+  collectCoverageFrom: ['src/**/*.ts', 'src/**/*.tsx'],
+  coveragePathIgnorePatterns: ['__tests__'],
 }

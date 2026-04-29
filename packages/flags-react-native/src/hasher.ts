@@ -47,12 +47,12 @@ function murmur3_32(key: string, seed: number = 0): number {
   const tailIndex = blocks * 4
 
   switch (len & 3) {
-    // @ts-expect-error intentional fallthrough
     case 3:
       k ^= (key.charCodeAt(tailIndex + 2) & 0xff) << 16
-    // @ts-expect-error intentional fallthrough
+    // falls through
     case 2:
       k ^= (key.charCodeAt(tailIndex + 1) & 0xff) << 8
+    // falls through
     case 1:
       k ^= key.charCodeAt(tailIndex) & 0xff
       k = Math.imul(k, c1)
