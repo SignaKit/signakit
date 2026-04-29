@@ -1,0 +1,43 @@
+name: Test — flags-browser SDK
+
+on:
+  pull_request:
+    paths:
+      - 'packages/flags-browser/**'
+      - '.github/workflows/test-flags-browser.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, lint, test & build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/flags-browser
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/flags-browser/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit & integration tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
