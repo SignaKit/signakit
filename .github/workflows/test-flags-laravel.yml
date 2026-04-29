@@ -1,0 +1,40 @@
+name: Test — flags-laravel SDK
+
+on:
+  pull_request:
+    paths:
+      - 'packages/flags-laravel/**'
+      - 'packages/flags-php/**'
+      - '.github/workflows/test-flags-laravel.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/flags-laravel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: json, curl
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: |
+          composer config repositories.flags-php '{"type":"path","url":"../flags-php","options":{"symlink":false}}'
+          composer config minimum-stability dev
+          composer config prefer-stable true
+          composer require 'signakit/flags-php:*@dev' --no-update
+          composer install --prefer-dist --no-progress
+
+      - name: Run tests
+        run: vendor/bin/phpunit
