@@ -19,9 +19,9 @@ final class ConfigManagerTest extends TestCase
     public static function validSdkKeyProvider(): array
     {
         return [
-            'prod key'        => ['sk_prod_org1_proj1_abc123', 'prod', 'org1',  'proj1'],
-            'dev key'         => ['sk_dev_org1_proj1_abc123',  'dev',  'org1',  'proj1'],
-            'long random part'=> ['sk_dev_myorg_myproj_verylongrandomstring', 'dev', 'myorg', 'myproj'],
+            'prod key'         => ['sk_prod_org1_proj1_abc123', 'prod', 'org1',  'proj1'],
+            'dev key'          => ['sk_dev_org1_proj1_abc123',  'dev',  'org1',  'proj1'],
+            'long random part' => ['sk_dev_myorg_myproj_verylongrandomstring', 'dev', 'myorg', 'myproj'],
         ];
     }
 
@@ -46,12 +46,12 @@ final class ConfigManagerTest extends TestCase
     public static function invalidSdkKeyProvider(): array
     {
         return [
-            'too few segments'   => ['sk_dev_org1'],
-            'wrong prefix'       => ['token_dev_org1_proj1_abc'],
-            'invalid env'        => ['sk_staging_org1_proj1_abc'],
-            'empty orgId'        => ['sk_dev__proj1_abc'],
-            'empty projectId'    => ['sk_dev_org1__abc'],
-            'empty random'       => ['sk_dev_org1_proj1_'],
+            'too few segments' => ['sk_dev_org1'],
+            'wrong prefix'     => ['token_dev_org1_proj1_abc'],
+            'invalid env'      => ['sk_staging_org1_proj1_abc'],
+            'empty orgId'      => ['sk_dev__proj1_abc'],
+            'empty projectId'  => ['sk_dev_org1__abc'],
+            'empty random'     => ['sk_dev_org1_proj1_'],
         ];
     }
 
@@ -66,10 +66,10 @@ final class ConfigManagerTest extends TestCase
     // fetchConfig — HTTP interactions
     // -------------------------------------------------------------------------
 
-    private function makeHttpClient(array $response): HttpClientInterface
+    private function makeStaticHttpClient(array $response): HttpClientInterface
     {
         return new class($response) implements HttpClientInterface {
-            public function __construct(private array $response) {}
+            public function __construct(private readonly array $response) {}
 
             public function get(string $url, array $headers = []): array
             {
@@ -90,7 +90,7 @@ final class ConfigManagerTest extends TestCase
             'flags'          => [],
         ];
 
-        $httpClient = $this->makeHttpClient([
+        $httpClient = $this->makeStaticHttpClient([
             'status'  => 200,
             'body'    => json_encode($payload),
             'headers' => ['etag' => '"abc123"'],
@@ -115,16 +115,24 @@ final class ConfigManagerTest extends TestCase
             'flags'          => [],
         ];
 
-        $callCount  = 0;
-        $httpClient = new class($payload, &$callCount) implements HttpClientInterface {
-            public function __construct(private array $payload, private int &$callCount) {}
+        // Use stdClass so the anonymous class can mutate state without a reference parameter
+        $spy        = new \stdClass();
+        $spy->calls = 0;
+
+        $httpClient = new class($payload, $spy) implements HttpClientInterface {
+            public function __construct(
+                private readonly array $payload,
+                private readonly \stdClass $spy,
+            ) {}
 
             public function get(string $url, array $headers = []): array
             {
-                $this->callCount++;
-                if ($this->callCount === 1) {
+                $this->spy->calls++;
+
+                if ($this->spy->calls === 1) {
                     return ['status' => 200, 'body' => json_encode($this->payload), 'headers' => ['etag' => '"v1"']];
                 }
+
                 return ['status' => 304, 'body' => '', 'headers' => []];
             }
 
@@ -136,12 +144,12 @@ final class ConfigManagerTest extends TestCase
         $second  = $manager->fetchConfig();
 
         $this->assertSame($first, $second);
-        $this->assertSame(2, $callCount);
+        $this->assertSame(2, $spy->calls);
     }
 
     public function test_fetchConfig_throws_after_exhausting_retries(): void
     {
-        $httpClient = $this->makeHttpClient([
+        $httpClient = $this->makeStaticHttpClient([
             'status'  => 503,
             'body'    => '',
             'headers' => [],
@@ -152,13 +160,13 @@ final class ConfigManagerTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessageMatches('/Failed to fetch config after/');
 
-        // ConfigManager retries 3×  with 1 s + 2 s back-off, so this test takes ~3 s.
+        // ConfigManager retries 3× with 1 s + 2 s back-off, so this test takes ~3 s.
         $manager->fetchConfig();
     }
 
-    public function test_getConfig_throws_before_initialize_is_called(): void
+    public function test_getConfig_throws_before_fetchConfig_is_called(): void
     {
-        $httpClient = $this->makeHttpClient(['status' => 200, 'body' => '{}', 'headers' => []]);
+        $httpClient = $this->makeStaticHttpClient(['status' => 200, 'body' => '{}', 'headers' => []]);
         $manager    = new ConfigManager('sk_dev_org1_proj1_abc', $httpClient);
 
         $this->expectException(RuntimeException::class);

@@ -39,10 +39,16 @@ final class SignaKitUserContextTest extends TestCase
         ], $overrides);
     }
 
-    private function makeHttpClient(?array &$lastPost = null): HttpClientInterface
+    /**
+     * Create an HTTP client spy. Pass a \stdClass to capture POST calls:
+     *   $spy = new \stdClass(); $spy->lastPost = null;
+     *   $client = $this->makeHttpSpy($spy);
+     *   // after the call: $spy->lastPost holds the captured request
+     */
+    private function makeHttpSpy(?\stdClass $spy = null): HttpClientInterface
     {
-        return new class($lastPost) implements HttpClientInterface {
-            public function __construct(private ?array &$lastPost) {}
+        return new class($spy) implements HttpClientInterface {
+            public function __construct(private readonly ?\stdClass $spy) {}
 
             public function get(string $url, array $headers = []): array
             {
@@ -51,7 +57,9 @@ final class SignaKitUserContextTest extends TestCase
 
             public function post(string $url, array $headers = [], string $body = ''): void
             {
-                $this->lastPost = ['url' => $url, 'headers' => $headers, 'body' => $body];
+                if ($this->spy !== null) {
+                    $this->spy->lastPost = ['url' => $url, 'headers' => $headers, 'body' => $body];
+                }
             }
         };
     }
@@ -60,13 +68,13 @@ final class SignaKitUserContextTest extends TestCase
         string $userId = 'user-1',
         array $attributes = [],
         array $flags = [],
-        ?array &$lastPost = null,
+        ?\stdClass $spy = null,
     ): SignaKitUserContext {
         return new SignaKitUserContext(
             userId:     $userId,
             attributes: $attributes,
             config:     $this->makeConfig($flags),
-            httpClient: $this->makeHttpClient($lastPost),
+            httpClient: $this->makeHttpSpy($spy),
             sdkKey:     'sk_dev_org1_proj1_abc',
         );
     }
@@ -143,12 +151,14 @@ final class SignaKitUserContextTest extends TestCase
 
     public function test_trackEvent_posts_a_conversion_event(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(userId: 'user-42', lastPost: $lastPost);
+        $spy          = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(userId: 'user-42', spy: $spy);
         $ctx->trackEvent('checkout_complete');
 
-        $this->assertNotNull($lastPost);
-        $payload = json_decode($lastPost['body'], associative: true);
+        $this->assertNotNull($spy->lastPost);
+        $payload = json_decode($spy->lastPost['body'], associative: true);
         $event   = $payload['events'][0];
 
         $this->assertSame('conversion', $event['type']);
@@ -159,31 +169,37 @@ final class SignaKitUserContextTest extends TestCase
 
     public function test_trackEvent_includes_value_when_provided(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(lastPost: $lastPost);
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(spy: $spy);
         $ctx->trackEvent('purchase', 49.99);
 
-        $payload = json_decode($lastPost['body'], associative: true);
+        $payload = json_decode($spy->lastPost['body'], associative: true);
         $this->assertSame(49.99, $payload['events'][0]['value']);
     }
 
     public function test_trackEvent_omits_value_when_not_provided(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(lastPost: $lastPost);
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(spy: $spy);
         $ctx->trackEvent('page_view');
 
-        $payload = json_decode($lastPost['body'], associative: true);
+        $payload = json_decode($spy->lastPost['body'], associative: true);
         $this->assertArrayNotHasKey('value', $payload['events'][0]);
     }
 
     public function test_trackEvent_sends_correct_sdk_key_header(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(lastPost: $lastPost);
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(spy: $spy);
         $ctx->trackEvent('any-event');
 
-        $this->assertSame('sk_dev_org1_proj1_abc', $lastPost['headers']['X-SDK-Key']);
+        $this->assertSame('sk_dev_org1_proj1_abc', $spy->lastPost['headers']['X-SDK-Key']);
     }
 
     // -------------------------------------------------------------------------
@@ -192,12 +208,14 @@ final class SignaKitUserContextTest extends TestCase
 
     public function test_sendExposure_posts_an_exposure_event(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(userId: 'user-99', lastPost: $lastPost);
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(userId: 'user-99', spy: $spy);
         $ctx->sendExposure('my-flag', 'on', 'rule-abc', 'ab-test');
 
-        $this->assertNotNull($lastPost);
-        $payload = json_decode($lastPost['body'], associative: true);
+        $this->assertNotNull($spy->lastPost);
+        $payload = json_decode($spy->lastPost['body'], associative: true);
         $event   = $payload['events'][0];
 
         $this->assertSame('$exposure', $event['type']);
@@ -209,21 +227,24 @@ final class SignaKitUserContextTest extends TestCase
 
     public function test_sendExposure_skips_targeted_rule_type(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(lastPost: $lastPost);
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(spy: $spy);
         $ctx->sendExposure('my-flag', 'on', 'rule-abc', 'targeted');
 
-        // No HTTP call should have been made
-        $this->assertNull($lastPost);
+        $this->assertNull($spy->lastPost);
     }
 
     public function test_sendExposure_fires_when_ruleType_is_null(): void
     {
-        $lastPost = null;
-        $ctx      = $this->makeContext(lastPost: $lastPost);
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(spy: $spy);
         $ctx->sendExposure('my-flag', 'on', null, null);
 
-        $this->assertNotNull($lastPost);
+        $this->assertNotNull($spy->lastPost);
     }
 
     public function test_sendExposure_silently_swallows_http_errors(): void
