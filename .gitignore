@@ -13,5 +13,6 @@
 
 **/.DS_Store
 
+.agents
 .claude
 AGENTS.md

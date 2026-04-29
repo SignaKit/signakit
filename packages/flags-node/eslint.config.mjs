@@ -10,5 +10,10 @@ export default defineConfig(
     ignores: ['**/build/**', '**/dist/**', '**/node_modules/**'],
   },
   eslint.configs.recommended,
-  tseslint.configs.recommended
+  tseslint.configs.recommended,
+  {
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { varsIgnorePattern: '^_', argsIgnorePattern: '^_' }],
+    },
+  }
 )

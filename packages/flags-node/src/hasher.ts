@@ -48,19 +48,15 @@ function murmur3_32(key: string, seed: number = 0): number {
   let k = 0
   const tailIndex = blocks * 4
 
-  switch (len & 3) {
-    // @ts-expect-error intentional fallthrough
-    case 3:
-      k ^= (key.charCodeAt(tailIndex + 2) & 0xff) << 16
-    // @ts-expect-error intentional fallthrough
-    case 2:
-      k ^= (key.charCodeAt(tailIndex + 1) & 0xff) << 8
-    case 1:
-      k ^= key.charCodeAt(tailIndex) & 0xff
-      k = Math.imul(k, c1)
-      k = (k << r1) | (k >>> (32 - r1))
-      k = Math.imul(k, c2)
-      hash ^= k
+  const tail = len & 3
+  if (tail >= 3) k ^= (key.charCodeAt(tailIndex + 2) & 0xff) << 16
+  if (tail >= 2) k ^= (key.charCodeAt(tailIndex + 1) & 0xff) << 8
+  if (tail >= 1) {
+    k ^= key.charCodeAt(tailIndex) & 0xff
+    k = Math.imul(k, c1)
+    k = (k << r1) | (k >>> (32 - r1))
+    k = Math.imul(k, c2)
+    hash ^= k
   }
 
   // Finalization
