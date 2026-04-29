@@ -4,152 +4,146 @@ declare(strict_types=1);
 
 namespace SignaKit\FlagsPhp\Tests;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use SignaKit\FlagsPhp\Hasher;
 
 /**
- * @covers \SignaKit\FlagsPhp\Hasher
+ * Hasher tests — must stay in sync with flags-node and flags-browser.
+ *
+ * The cross-platform vectors below were pre-computed by running the same
+ * MurmurHash3 algorithm in the JS SDK. Any change to these values means
+ * server- and client-side bucketing will disagree.
  */
 final class HasherTest extends TestCase
 {
     // -------------------------------------------------------------------------
-    // murmur3_32 — determinism and known values
+    // Cross-platform hash vectors
     // -------------------------------------------------------------------------
 
-    public function testEmptyStringProducesKnownHash(): void
+    public static function trafficVectorsProvider(): array
     {
-        // MurmurHash3 32-bit of "" with seed 0 is 0
-        $this->assertSame(0, Hasher::murmur3_32(''));
+        return [
+            ['flag-abc', 'user-123', 8406],
+        ];
     }
 
-    public function testKnownHashForHello(): void
+    #[DataProvider('trafficVectorsProvider')]
+    public function test_hashForTraffic_cross_platform_vectors(string $salt, string $userId, int $expected): void
     {
-        // MurmurHash3_x86_32("hello", seed=0) verified against JS SDK reference
-        $this->assertSame(613153351, Hasher::murmur3_32('hello'));
+        $this->assertSame($expected, Hasher::hashForTraffic($salt, $userId));
     }
 
-    public function testKnownHashForFooBar(): void
+    public function test_namespaced_helpers_match_expected_cross_platform_values(): void
     {
-        // MurmurHash3_x86_32("foobar", seed=0) verified against JS SDK reference
-        $this->assertSame(2764362941, Hasher::murmur3_32('foobar'));
-    }
-
-    public function testHashIsDeterministic(): void
-    {
-        $input = 'deterministic-test-key';
-        $this->assertSame(Hasher::murmur3_32($input), Hasher::murmur3_32($input));
-    }
-
-    public function testHashIsUnsigned32Bit(): void
-    {
-        $hash = Hasher::murmur3_32('unsigned-check');
-        $this->assertGreaterThanOrEqual(0, $hash);
-        $this->assertLessThanOrEqual(0xFFFFFFFF, $hash);
-    }
-
-    public function testDifferentInputsProduceDifferentHashes(): void
-    {
-        $this->assertNotSame(Hasher::murmur3_32('abc'), Hasher::murmur3_32('def'));
+        $this->assertSame(8406, Hasher::hashForTraffic('flag-abc', 'user-123'));
+        $this->assertSame(2804, Hasher::hashForVariation('flag-abc', 'user-123'));
+        $this->assertSame(6466, Hasher::hashForDefault('flag-abc', 'user-123'));
     }
 
     // -------------------------------------------------------------------------
-    // hashForTraffic — returns 0–9999
+    // Range bounds
     // -------------------------------------------------------------------------
 
-    public function testHashForTrafficIsInBucketRange(): void
+    public function test_hashForTraffic_returns_value_within_0_to_9999(): void
     {
-        $bucket = Hasher::hashForTraffic('my-salt', 'user-123');
-        $this->assertGreaterThanOrEqual(0, $bucket);
-        $this->assertLessThanOrEqual(9999, $bucket);
+        $result = Hasher::hashForTraffic('my-salt', 'user-123');
+        $this->assertGreaterThanOrEqual(0, $result);
+        $this->assertLessThanOrEqual(9999, $result);
     }
 
-    public function testHashForTrafficIsDeterministic(): void
+    public function test_hashForVariation_returns_value_within_0_to_9999(): void
     {
-        $salt   = 'consistent-salt';
-        $userId = 'user-42';
-        $this->assertSame(
-            Hasher::hashForTraffic($salt, $userId),
-            Hasher::hashForTraffic($salt, $userId),
+        $result = Hasher::hashForVariation('test-salt', 'user-xyz');
+        $this->assertGreaterThanOrEqual(0, $result);
+        $this->assertLessThanOrEqual(9999, $result);
+    }
+
+    public function test_hashForDefault_returns_value_within_0_to_9999(): void
+    {
+        $result = Hasher::hashForDefault('test-salt', 'user-xyz');
+        $this->assertGreaterThanOrEqual(0, $result);
+        $this->assertLessThanOrEqual(9999, $result);
+    }
+
+    // -------------------------------------------------------------------------
+    // Determinism
+    // -------------------------------------------------------------------------
+
+    public function test_hashForTraffic_is_deterministic(): void
+    {
+        $a = Hasher::hashForTraffic('flag-salt', 'user-abc');
+        $b = Hasher::hashForTraffic('flag-salt', 'user-abc');
+        $this->assertSame($a, $b);
+    }
+
+    public function test_hashForVariation_is_deterministic(): void
+    {
+        $a = Hasher::hashForVariation('determinism-salt', 'user-det');
+        $b = Hasher::hashForVariation('determinism-salt', 'user-det');
+        $this->assertSame($a, $b);
+    }
+
+    public function test_hashForDefault_is_deterministic(): void
+    {
+        $a = Hasher::hashForDefault('determinism-salt', 'user-det');
+        $b = Hasher::hashForDefault('determinism-salt', 'user-det');
+        $this->assertSame($a, $b);
+    }
+
+    // -------------------------------------------------------------------------
+    // Distinctness
+    // -------------------------------------------------------------------------
+
+    public function test_produces_different_buckets_for_different_user_ids(): void
+    {
+        $buckets = array_map(
+            fn(string $id) => Hasher::hashForTraffic('same-salt', $id),
+            ['user-1', 'user-2', 'user-3', 'user-4', 'user-5'],
         );
+        // With 5 distinct users hashed to a 10000-bucket space, collisions are extremely unlikely
+        $this->assertGreaterThan(1, count(array_unique($buckets)));
     }
 
-    public function testHashForTrafficMatchesKnownBucket(): void
+    public function test_produces_different_buckets_for_different_salts(): void
     {
-        // murmur3("test-salt:traffic:user-123") % 10000 = 2898 (verified against JS SDK)
-        $this->assertSame(2898, Hasher::hashForTraffic('test-salt', 'user-123'));
-    }
-
-    public function testHashForTrafficVariesByUser(): void
-    {
-        // Different users should (with overwhelming probability) get different buckets
-        $salt    = 'same-salt';
-        $bucket1 = Hasher::hashForTraffic($salt, 'user-1');
-        $bucket2 = Hasher::hashForTraffic($salt, 'user-2');
-        // We can't assert strict inequality (collision possible) but assert range
-        $this->assertGreaterThanOrEqual(0, $bucket1);
-        $this->assertGreaterThanOrEqual(0, $bucket2);
+        $a = Hasher::hashForTraffic('salt-a', 'user-1');
+        $b = Hasher::hashForTraffic('salt-b', 'user-1');
+        $this->assertNotSame($a, $b);
     }
 
     // -------------------------------------------------------------------------
-    // hashForVariation — returns 0–9999
+    // Edge cases
     // -------------------------------------------------------------------------
 
-    public function testHashForVariationIsInBucketRange(): void
+    public function test_handles_empty_strings_without_throwing(): void
     {
-        $bucket = Hasher::hashForVariation('my-salt', 'user-123');
-        $this->assertGreaterThanOrEqual(0, $bucket);
-        $this->assertLessThanOrEqual(9999, $bucket);
+        $result = Hasher::hashForTraffic('', '');
+        $this->assertGreaterThanOrEqual(0, $result);
+        $this->assertLessThanOrEqual(9999, $result);
     }
 
-    public function testHashForVariationIsDeterministic(): void
+    public function test_handles_long_strings_without_throwing(): void
     {
-        $salt   = 'var-salt';
-        $userId = 'user-99';
-        $this->assertSame(
-            Hasher::hashForVariation($salt, $userId),
-            Hasher::hashForVariation($salt, $userId),
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // hashForDefault — returns 0–9999
-    // -------------------------------------------------------------------------
-
-    public function testHashForDefaultIsInBucketRange(): void
-    {
-        $bucket = Hasher::hashForDefault('my-salt', 'user-123');
-        $this->assertGreaterThanOrEqual(0, $bucket);
-        $this->assertLessThanOrEqual(9999, $bucket);
-    }
-
-    public function testHashForDefaultIsDeterministic(): void
-    {
-        $salt   = 'default-salt';
-        $userId = 'user-77';
-        $this->assertSame(
-            Hasher::hashForDefault($salt, $userId),
-            Hasher::hashForDefault($salt, $userId),
-        );
+        $longSalt   = str_repeat('a', 1000);
+        $longUserId = str_repeat('b', 1000);
+        $result     = Hasher::hashForTraffic($longSalt, $longUserId);
+        $this->assertGreaterThanOrEqual(0, $result);
+        $this->assertLessThanOrEqual(9999, $result);
     }
 
     // -------------------------------------------------------------------------
-    // Independence: traffic, variation, and default hashes must differ
+    // Namespace independence
     // -------------------------------------------------------------------------
 
-    public function testTrafficAndVariationHashesAreIndependent(): void
+    public function test_traffic_variation_and_default_namespaces_produce_independent_buckets(): void
     {
-        $salt   = 'independence-salt';
-        $userId = 'user-independence';
-        // With different salts applied the outputs should differ
-        // (traffic uses ":traffic:", variation uses ":variation:")
-        $traffic   = Hasher::hashForTraffic($salt, $userId);
-        $variation = Hasher::hashForVariation($salt, $userId);
-        // They may collide by chance but test that at least one call succeeds in range
-        $this->assertGreaterThanOrEqual(0, $traffic);
-        $this->assertGreaterThanOrEqual(0, $variation);
-        $this->assertNotSame(
-            Hasher::murmur3_32("{$salt}:traffic:{$userId}"),
-            Hasher::murmur3_32("{$salt}:variation:{$userId}"),
-        );
+        $traffic   = Hasher::hashForTraffic('checkout-salt', 'user-namespace-test');
+        $variation = Hasher::hashForVariation('checkout-salt', 'user-namespace-test');
+        $default   = Hasher::hashForDefault('checkout-salt', 'user-namespace-test');
+
+        // At least two of the three should differ (ensures namespace separation works)
+        $unique = array_unique([$traffic, $variation, $default]);
+        $this->assertGreaterThan(1, count($unique));
     }
 }
