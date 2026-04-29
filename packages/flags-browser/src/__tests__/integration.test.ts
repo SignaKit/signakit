@@ -1,22 +1,22 @@
 /**
- * Integration tests — "real app" simulation.
+ * Integration tests — "real browser app" simulation.
  *
- * These tests exercise the SDK exactly as an application developer would:
+ * These tests exercise the SDK exactly as a browser application developer would:
  * - Import only from the public API (index.ts)
- * - Create one client at startup, re-use it per request
- * - Create a new user context per incoming request
+ * - Create one client at startup, re-use it per page load
+ * - Create a new user context per page
  * - No access to internal modules
  *
- * fetch is mocked to return a realistic config and accept events,
- * simulating the CloudFront CDN and the SignaKit events API.
+ * fetch is mocked to simulate the CloudFront CDN and SignaKit events API.
+ * navigator.sendBeacon is disabled so events fall back to fetch for easy inspection.
+ * sessionStorage is cleared between tests to reset exposure deduplication state.
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 import { createInstance } from '../index'
 import type { SignaKitClient } from '../index'
 import { mockConfig, MOCK_SDK_KEY } from './fixtures/config'
 
-// Shared mock for all integration tests
 const mockFetch = vi.fn().mockImplementation(async (url: string) => {
   if (typeof url === 'string' && url.includes('cloudfront.net')) {
     return new Response(JSON.stringify(mockConfig), {
@@ -24,14 +24,18 @@ const mockFetch = vi.fn().mockImplementation(async (url: string) => {
       headers: new Headers({ 'content-type': 'application/json', etag: '"integration-etag"' }),
     })
   }
-  // Events API — always accept
   return new Response(JSON.stringify({ received: true }), { status: 200 })
 })
 
-// Simulates one-time application startup: create client and wait for config to load.
 let client: SignaKitClient
 
 beforeAll(async () => {
+  // Disable sendBeacon so events use fetch and can be inspected
+  Object.defineProperty(navigator, 'sendBeacon', {
+    value: undefined,
+    configurable: true,
+    writable: true,
+  })
   vi.stubGlobal('fetch', mockFetch)
   const instance = createInstance({ sdkKey: MOCK_SDK_KEY })
   expect(instance).not.toBeNull()
@@ -40,15 +44,18 @@ beforeAll(async () => {
   expect(success).toBe(true)
 })
 
+beforeEach(() => {
+  sessionStorage.clear()
+})
+
 afterAll(() => {
   vi.unstubAllGlobals()
 })
 
-// --- Request handling ---
+// --- Per-page flag evaluation ---
 
-describe('per-request flag evaluation', () => {
+describe('per-page flag evaluation', () => {
   it('premium user enters the A/B test and receives a deterministic variation', () => {
-    // Simulates: GET /checkout, user = { id: 'user-premium-1', plan: 'premium' }
     const ctx = client.createUserContext('user-premium-1', { plan: 'premium' })!
     const decision = ctx.decide('new-checkout-flow')
 
@@ -58,7 +65,6 @@ describe('per-request flag evaluation', () => {
   })
 
   it('free user does not enter the premium A/B test rule', () => {
-    // Simulates: GET /checkout, user = { id: 'user-free-1', plan: 'free' }
     const ctx = client.createUserContext('user-free-1', { plan: 'free' })!
     const decision = ctx.decide('new-checkout-flow')
 
@@ -99,21 +105,21 @@ describe('per-request flag evaluation', () => {
   })
 })
 
-// --- Consistency across requests ---
+// --- Consistency across page loads ---
 
-describe('deterministic bucketing across requests', () => {
-  it('same user always gets the same variation on repeated requests', () => {
+describe('deterministic bucketing across page loads', () => {
+  it('same user always gets the same variation on repeated page loads', () => {
     const userId = 'user-consistency-check'
     const attributes = { plan: 'premium' }
 
-    // Simulate 10 separate requests from the same user
     const variations = Array.from({ length: 10 }, () => {
+      sessionStorage.clear() // simulate a new page load
       const ctx = client.createUserContext(userId, attributes)!
       return ctx.decide('new-checkout-flow')!.variationKey
     })
 
     const unique = new Set(variations)
-    expect(unique.size).toBe(1) // exactly one variation, always
+    expect(unique.size).toBe(1)
   })
 
   it('different users get independently bucketed results', () => {
@@ -121,7 +127,6 @@ describe('deterministic bucketing across requests', () => {
       const ctx = client.createUserContext(id)!
       return ctx.decide('new-checkout-flow')!.variationKey
     })
-    // Not all users should get the exact same variation (probabilistic, but reliable)
     expect(new Set(results).size).toBeGreaterThan(1)
   })
 })
@@ -150,7 +155,6 @@ describe('bot exclusion', () => {
       $userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     })!
-    // dark-mode is 100% targeted rollout — a real user should get 'on'
     expect(ctx.decide('dark-mode')!.variationKey).toBe('on')
   })
 })
@@ -159,13 +163,12 @@ describe('bot exclusion', () => {
 
 describe('flag variables', () => {
   it('v2 variation returns correct variable overrides', () => {
-    // feature-with-vars has all users in v2 via default allocation
     const ctx = client.createUserContext('user-vars')!
     const decision = ctx.decide('feature-with-vars')!
     expect(decision.variationKey).toBe('v2')
-    expect(decision.variables['color']).toBe('blue') // override
-    expect(decision.variables['count']).toBe(5) // override
-    expect(decision.variables['enabled']).toBe(true) // default (not overridden)
+    expect(decision.variables['color']).toBe('blue')
+    expect(decision.variables['count']).toBe(5)
+    expect(decision.variables['enabled']).toBe(true)
   })
 })
 
@@ -175,12 +178,10 @@ describe('conversion tracking', () => {
   it('tracks a purchase event with value and attaches flag decisions as context', async () => {
     mockFetch.mockClear()
 
-    // Simulate: user views the checkout, then completes a purchase
     const ctx = client.createUserContext('user-buyer', { plan: 'premium' })!
-    ctx.decide('new-checkout-flow') // flags checked at start of the flow
+    ctx.decide('new-checkout-flow')
     await ctx.trackEvent('purchase', { value: 99.99, metadata: { plan: 'pro' } })
 
-    // decide() fires an async exposure event before trackEvent sends the purchase — find by eventKey
     type EventPayload = { eventKey: string; value: number; decisions: Record<string, string>; metadata: Record<string, unknown> }
     const eventsCalls = mockFetch.mock.calls.filter(([url]) =>
       url.includes('execute-api')
@@ -214,14 +215,12 @@ describe('conversion tracking', () => {
   })
 
   it('targeted rule decisions do not fire exposure events', async () => {
-    // Wait for any pending microtasks from previous tests
     await new Promise((resolve) => setTimeout(resolve, 10))
     mockFetch.mockClear()
 
     const ctx = client.createUserContext('user-targeted')!
-    ctx.decide('dark-mode') // targeted rule — should NOT fire an exposure event
+    ctx.decide('dark-mode') // targeted rule — should NOT fire an exposure
 
-    // Flush pending microtasks (exposure events are fire-and-forget)
     await new Promise((resolve) => setTimeout(resolve, 10))
 
     const exposureCalls = mockFetch.mock.calls.filter(([url]) =>
@@ -235,9 +234,8 @@ describe('conversion tracking', () => {
     mockFetch.mockClear()
 
     const ctx = client.createUserContext('user-abtest', { plan: 'premium' })!
-    ctx.decide('new-checkout-flow') // ab-test rule — SHOULD fire an exposure event
+    ctx.decide('new-checkout-flow') // ab-test rule — SHOULD fire an exposure
 
-    // Flush pending microtasks
     await new Promise((resolve) => setTimeout(resolve, 10))
 
     const exposureCalls = mockFetch.mock.calls.filter(([url]) =>
@@ -249,5 +247,29 @@ describe('conversion tracking', () => {
       (exposureCalls[0] as [string, RequestInit])[1].body as string
     ) as { events: Array<{ eventKey: string }> }
     expect(body.events[0]!.eventKey).toBe('$exposure')
+  })
+
+  it('second decide for the same user/flag does not fire a duplicate exposure', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    mockFetch.mockClear()
+
+    const ctx = client.createUserContext('user-dedup-int', { plan: 'premium' })!
+    ctx.decide('new-checkout-flow')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const firstCount = mockFetch.mock.calls.filter(([url]) =>
+      url.includes('execute-api')
+    ).length
+    mockFetch.mockClear()
+
+    ctx.decide('new-checkout-flow') // same flag, same session
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const secondCount = mockFetch.mock.calls.filter(([url]) =>
+      url.includes('execute-api')
+    ).length
+
+    expect(firstCount).toBeGreaterThan(0)
+    expect(secondCount).toBe(0) // deduplicated by sessionStorage
   })
 })
