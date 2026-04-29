@@ -1,141 +1,94 @@
 package signakit
 
+import "github.com/signakit/flags-golang/internal/types"
+
 // Environment is the deployment environment.
-type Environment string
+type Environment = types.Environment
 
 // Environment values.
 const (
-	EnvironmentDevelopment Environment = "development"
-	EnvironmentProduction  Environment = "production"
+	EnvironmentDevelopment = types.EnvironmentDevelopment
+	EnvironmentProduction  = types.EnvironmentProduction
 )
 
 // RuleType identifies the kind of rule that produced a decision.
-type RuleType string
+type RuleType = types.RuleType
 
 // RuleType values.
 const (
-	RuleTypeABTest           RuleType = "ab-test"
-	RuleTypeMultiArmedBandit RuleType = "multi-armed-bandit"
-	RuleTypeTargeted         RuleType = "targeted"
+	RuleTypeABTest           = types.RuleTypeABTest
+	RuleTypeMultiArmedBandit = types.RuleTypeMultiArmedBandit
+	RuleTypeTargeted         = types.RuleTypeTargeted
 )
 
 // AudienceMatchType determines how multiple audiences combine.
-type AudienceMatchType string
+type AudienceMatchType = types.AudienceMatchType
 
 // AudienceMatchType values.
 const (
-	AudienceMatchAny AudienceMatchType = "any"
-	AudienceMatchAll AudienceMatchType = "all"
+	AudienceMatchAny = types.AudienceMatchAny
+	AudienceMatchAll = types.AudienceMatchAll
 )
 
 // FlagStatus marks whether a flag is active or archived.
-type FlagStatus string
+type FlagStatus = types.FlagStatus
 
 // FlagStatus values.
 const (
-	FlagStatusActive   FlagStatus = "active"
-	FlagStatusArchived FlagStatus = "archived"
+	FlagStatusActive   = types.FlagStatusActive
+	FlagStatusArchived = types.FlagStatusArchived
 )
 
 // ConditionOperator is the comparison operator used in audience conditions.
-type ConditionOperator string
+type ConditionOperator = types.ConditionOperator
 
 // ConditionOperator values.
 const (
-	OpEquals             ConditionOperator = "equals"
-	OpNotEquals          ConditionOperator = "not_equals"
-	OpGreaterThan        ConditionOperator = "greater_than"
-	OpLessThan           ConditionOperator = "less_than"
-	OpGreaterThanOrEqual ConditionOperator = "greater_than_or_equals"
-	OpLessThanOrEqual    ConditionOperator = "less_than_or_equals"
-	OpIn                 ConditionOperator = "in"
-	OpNotIn              ConditionOperator = "not_in"
-	OpContains           ConditionOperator = "contains"
-	OpNotContains        ConditionOperator = "not_contains"
+	OpEquals             = types.OpEquals
+	OpNotEquals          = types.OpNotEquals
+	OpGreaterThan        = types.OpGreaterThan
+	OpLessThan           = types.OpLessThan
+	OpGreaterThanOrEqual = types.OpGreaterThanOrEqual
+	OpLessThanOrEqual    = types.OpLessThanOrEqual
+	OpIn                 = types.OpIn
+	OpNotIn              = types.OpNotIn
+	OpContains           = types.OpContains
+	OpNotContains        = types.OpNotContains
 )
 
 // UserAttributes is the set of attributes used for audience targeting and event
 // enrichment. Values may be string, float64, bool, []string, or []any. The
 // special key "$userAgent" is consumed by bot detection and stripped before
 // targeting.
-type UserAttributes map[string]any
+type UserAttributes = types.UserAttributes
 
 // FlagVariable describes a flag-level variable definition.
-type FlagVariable struct {
-	Key          string `json:"key"`
-	Type         string `json:"type"` // "string" | "number" | "boolean" | "json"
-	DefaultValue any    `json:"defaultValue"`
-}
+type FlagVariable = types.FlagVariable
 
 // Variation is a single named variation in a flag.
-type Variation struct {
-	Key       string         `json:"key"`
-	Variables map[string]any `json:"variables,omitempty"`
-}
+type Variation = types.Variation
 
 // VariationAllocationRange defines a [Start, End] (inclusive) bucket range
 // mapped to a variation key.
-type VariationAllocationRange struct {
-	Variation string `json:"variation"`
-	Start     int    `json:"start"`
-	End       int    `json:"end"`
-}
+type VariationAllocationRange = types.VariationAllocationRange
 
 // VariationAllocation holds a list of inclusive bucket ranges.
-type VariationAllocation struct {
-	Ranges []VariationAllocationRange `json:"ranges"`
-}
+type VariationAllocation = types.VariationAllocation
 
 // AudienceCondition is a single targeting condition.
-type AudienceCondition struct {
-	Attribute string            `json:"attribute"`
-	Operator  ConditionOperator `json:"operator"`
-	Value     any               `json:"value"`
-}
+type AudienceCondition = types.AudienceCondition
 
 // ConfigRuleAudience is a group of conditions ANDed together.
-type ConfigRuleAudience struct {
-	Conditions []AudienceCondition `json:"conditions"`
-}
+type ConfigRuleAudience = types.ConfigRuleAudience
 
 // AllowlistEntry pins a userId to a specific variation.
-type AllowlistEntry struct {
-	UserID    string `json:"userId"`
-	Variation string `json:"variation"`
-}
+type AllowlistEntry = types.AllowlistEntry
 
 // ConfigRule describes a single targeting rule on a flag.
-type ConfigRule struct {
-	RuleKey             string               `json:"ruleKey"`
-	RuleType            RuleType             `json:"ruleType"`
-	AudienceMatchType   AudienceMatchType    `json:"audienceMatchType,omitempty"`
-	Audiences           []ConfigRuleAudience `json:"audiences,omitempty"`
-	TrafficPercentage   float64              `json:"trafficPercentage"`
-	VariationAllocation VariationAllocation  `json:"variationAllocation"`
-	Allowlist           []AllowlistEntry     `json:"allowlist,omitempty"`
-	EventKeys           []string             `json:"eventKeys,omitempty"`
-	PrimaryEventKey     string               `json:"primaryEventKey,omitempty"`
-}
+type ConfigRule = types.ConfigRule
 
 // ConfigFlag is a single flag in the project config.
-type ConfigFlag struct {
-	ID         string              `json:"id"`
-	Key        string              `json:"key"`
-	Variations []Variation         `json:"variations"`
-	Variables  []FlagVariable      `json:"variables,omitempty"`
-	Allocation VariationAllocation `json:"allocation"`
-	Salt       string              `json:"salt"`
-	Status     FlagStatus          `json:"status"`
-	Running    bool                `json:"running"`
-	Rules      []ConfigRule        `json:"rules,omitempty"`
-}
+type ConfigFlag = types.ConfigFlag
 
 // ProjectConfig is the JSON document fetched from the CDN.
-type ProjectConfig struct {
-	ProjectID      string       `json:"projectId"`
-	EnvironmentKey Environment  `json:"environmentKey"`
-	SDKKey         string       `json:"sdkKey"`
-	Version        int          `json:"version"`
-	Flags          []ConfigFlag `json:"flags"`
-	GeneratedAt    string       `json:"generatedAt"`
-}
+type ProjectConfig = types.ProjectConfig
