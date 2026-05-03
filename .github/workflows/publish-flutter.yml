@@ -1,0 +1,36 @@
+name: Publish Flutter
+
+on:
+  push:
+    tags:
+      - 'flutter-v*'
+
+concurrency:
+  group: publish-flutter
+  cancel-in-progress: false
+
+jobs:
+  publish-flags-flutter:
+    name: Publish flags-flutter
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/flags-flutter
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Publish
+        run: dart pub publish --force
