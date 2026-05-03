@@ -1,0 +1,66 @@
+name: Publish Go
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: publish-golang
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      flags-golang: ${{ steps.filter.outputs.flags-golang }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            flags-golang:
+              - 'packages/flags-golang/**'
+
+  publish-flags-golang:
+    name: Publish flags-golang
+    needs: changes
+    if: needs.changes.outputs.flags-golang == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Read version
+        id: version
+        run: echo "value=$(cat packages/flags-golang/VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists on split repo
+        id: check
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          if git ls-remote --tags "https://github.com/signakit/flags-golang.git" | grep -q "refs/tags/$TAG$"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $TAG already published — skipping."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Split, push, and tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          git subtree split --prefix=packages/flags-golang -b split/flags-golang
+          git push "https://x-access-token:${GH_PAT}@github.com/signakit/flags-golang.git" split/flags-golang:main
+          git tag "$TAG" split/flags-golang
+          git push "https://x-access-token:${GH_PAT}@github.com/signakit/flags-golang.git" "$TAG"
+          git branch -D split/flags-golang
