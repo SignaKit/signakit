@@ -1,0 +1,110 @@
+---
+title: Feature Variables
+description: Attach typed configuration values to feature flag variations — strings, numbers, booleans, and JSON — for remote config without a code deploy.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Feature Variables
+
+## What Are Feature Variables?
+
+Feature variables allow a feature flag to carry typed configuration values alongside the on/off decision. Instead of a flag returning only `enabled: true`, it can return `{ enabled: true, variables: { buttonColor: 'blue', maxItems: 10, showBadge: false } }`. This turns a feature flag into a remote configuration system — the values can be changed in the SignaKit dashboard without a code deploy.
+
+Variables are defined per-variation. Each variation in a flag can carry its own set of variable values, so a `control` variation might return `{ theme: 'light' }` while a `treatment` variation returns `{ theme: 'dark' }`. This makes variables a natural fit for A/B tests where the two experiences differ in configuration, not just in which code path runs.
+
+---
+
+## How Variables Work in SignaKit
+
+Variables are part of the flag configuration fetched from the SignaKit CDN at SDK initialization. They are evaluated locally alongside the flag state — no extra network call is needed to read a variable. When `decide()` returns a decision object, the `variables` field contains the key-value pairs defined for the matched variation in the dashboard.
+
+```ts
+const decision = userCtx.decide('checkout-redesign')
+
+if (decision?.enabled) {
+  const ctaText = decision.variables.ctaText as string    // "Try it free"
+  const maxItems = decision.variables.maxItems as number  // 5
+}
+```
+
+All variations — including the default off variation — can have variable values. If no variables are configured for a variation, `decision.variables` is an empty object `{}`, never `undefined`.
+
+<Callout type="info">
+  `variables` is always present on a non-null decision object. It is safe to access `decision.variables` without guarding against `undefined` on the object itself — only the individual key access may return `undefined` if that key is not configured for a variation.
+</Callout>
+
+---
+
+## Supported Variable Types
+
+| Type | Example value | Common use cases |
+|---|---|---|
+| `string` | `"blue"`, `"Try it free"` | UI copy, color tokens, API endpoint variants |
+| `number` | `42`, `0.15`, `1000` | Rate limits, pagination size, timeout values, price |
+| `boolean` | `true`, `false` | Sub-feature toggles within a flag |
+| `json` | `{"tier": "pro", "limit": 100}` | Complex configuration objects |
+
+---
+
+## Accessing Variables
+
+The `variables` field on a decision object is a `Record<string, unknown>`. Cast each value to the expected type before use:
+
+```ts title="Node.js"
+const decision = userCtx.decide('pricing-page')
+
+if (!decision?.enabled) return renderDefault()
+
+const headline = decision.variables.headline as string
+const price = decision.variables.price as number
+const showAnnual = decision.variables.showAnnual as boolean
+const config = decision.variables.config as { tier: string; limit: number }
+```
+
+<Callout type="warning">
+  Always provide fallback values when accessing variables. If a variable key is not defined for a variation in the dashboard, it returns `undefined`. Guard against this in production: `const headline = (decision.variables.headline as string) ?? 'Default headline'`.
+</Callout>
+
+---
+
+## Common Use Cases
+
+- **A/B test copy**: define different `headline` and `ctaText` values per variation to test messaging without shipping new code
+- **Gradual configuration migration**: change an API endpoint or timeout value remotely for a percentage of users before rolling out fully
+- **Per-tier feature configuration**: configure limits (`maxItems`, `requestsPerMinute`) differently for free vs. pro users via targeting rules
+- **UI theming**: ship color tokens or layout variants as variables, letting the dashboard drive visual changes
+- **Pricing experiments**: test different price points by varying a `price` number variable across experiment variations
+
+---
+
+## Best Practices
+
+- **Always define variables for the off/default variation.** If your code reads `decision.variables.ctaText`, the off variation should also define `ctaText` with a sensible default. Otherwise users who receive the off state get `undefined`.
+- **Keep variable schemas consistent across variations.** Use the same key names in every variation to avoid branching on key presence in your code.
+- **Do not store secrets in variables.** Flag configurations are downloaded to client-side SDKs. Any variable value is readable by users with access to the browser or mobile app.
+- **Keep values small.** Variables are included in every SDK config fetch. Store large assets by reference (a URL) rather than inline to keep the config payload lean.
+
+---
+
+## Frequently Asked Questions
+
+### Are variables available even when a flag is off?
+
+Yes, if you configure them. A decision object is returned for `enabled: false` just as it is for `enabled: true`. You can define variable values on the off variation in the dashboard, and they will be present in `decision.variables` even when `decision.enabled` is `false`. This is useful for providing default values through the same code path.
+
+### Can different variations have different variable keys?
+
+Yes, but doing so makes your code more complex — you would need to check for key presence before accessing each variable. The recommended pattern is to define the same set of keys on every variation with different values, so you can write `decision.variables.myKey` unconditionally (with only a `?? fallback` guard).
+
+### Are feature variables the same as remote config?
+
+They serve a similar purpose — changing runtime configuration without a code deploy — but they are tied to feature flag state and targeting rules. A variable value changes based on which variation a user is in, not just by toggling a config value globally. If you want to change a value for all users simultaneously, use a flag set to "On for everyone" with variables on the on variation.
+
+---
+
+## Related
+
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how the Decision object works end-to-end
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — how variables are included in the config payload
+- [Node.js SDK](/docs/flags/sdks/node) — full API reference including the `variables` field

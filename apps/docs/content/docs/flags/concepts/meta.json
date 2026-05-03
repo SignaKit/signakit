@@ -9,6 +9,7 @@
     "events-and-metrics",
     "environments",
     "user-ids",
+    "variables",
     "sdk-architecture"
   ]
 }

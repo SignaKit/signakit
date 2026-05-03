@@ -1,13 +1,17 @@
 ---
 title: Introduction
-description: Feature flags, targeted rollouts, A/B tests, and multi-armed bandits for any platform.
+description: SignaKit Flags is a developer-first feature flag SDK for gradual rollouts, A/B testing, and audience targeting across 10 platforms — with local evaluation.
 ---
 
 import { Cards, Card } from 'fumadocs-ui/components/card'
 
 # SignaKit Flags
 
-Feature flags, targeted rollouts, A/B tests, and multi-armed bandits. Evaluate flags locally in your app — no network call per decision.
+SignaKit Flags is a developer-first feature flag platform built for teams that ship continuously. It supports gradual rollouts, A/B testing, multi-armed bandits, and precise audience targeting — all from a single SDK. With official support for 10 platforms including Node.js, React, React Native, Python, Go, Java, PHP, Laravel, and Flutter, you can manage flags consistently across every layer of your stack.
+
+The core architecture is designed around a single constraint: zero latency on the evaluation path. On startup, the SDK fetches your flag configuration once from CloudFront-backed S3 storage, then caches it in memory. Every subsequent `decide()` call evaluates entirely locally — no network round-trip, no added latency, no external dependency on the hot path. In practice this means sub-millisecond flag evaluation regardless of where your code runs.
+
+Whether you are rolling out a new feature to 5% of users, running a multivariate A/B test, or building a targeted rollout for a specific customer segment, SignaKit Flags gives you the primitives to do it safely. Choose your path below to get started.
 
 <Cards>
   <Card title="Quickstart" href="/flags/quickstart" description="Get your first flag evaluating in 5 minutes." />

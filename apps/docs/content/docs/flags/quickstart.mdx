@@ -9,7 +9,7 @@ import { Steps, Step } from 'fumadocs-ui/components/steps'
 
 # Quickstart
 
-Get a feature flag evaluating in your app in 5 minutes.
+In 5 minutes, you'll install the SignaKit SDK, create your first feature flag evaluation, and see it working in your chosen language or framework. SignaKit evaluates flags locally after a single config fetch — there's no network call on the hot `decide()` path. Pick your platform below and follow the three steps to get your first flag decision logged.
 
 <Steps>
 
@@ -96,7 +96,7 @@ npx expo install @signakit/flags-react-native
 
 ## Initialize and evaluate
 
-<Tabs items={['Node / Next.js', 'React', 'Python']}>
+<Tabs items={['Node / Next.js', 'React', 'Python', 'Go', 'PHP / Laravel', 'Flutter', 'React Native']}>
 
 <Tab>
 ```typescript
@@ -146,6 +146,98 @@ decision = user.decide("my-first-flag")
 
 if decision and decision.enabled:
     # show the new experience
+```
+</Tab>
+
+<Tab>
+```go
+import (
+    "context"
+    "fmt"
+    "os"
+
+    sk "github.com/signakit/flags-golang/signakit"
+)
+
+// Initialize once at startup
+client, err := sk.NewClient(context.Background(), os.Getenv("SIGNAKIT_SDK_KEY"))
+if err != nil {
+    log.Fatalf("signakit: %v", err)
+}
+
+userCtx := client.CreateUserContext("user-123", sk.UserAttributes{"plan": "pro"})
+decision := userCtx.Decide("my-first-flag")
+
+if decision != nil && decision.Enabled {
+    fmt.Println("flag on, variation:", decision.VariationKey)
+}
+```
+</Tab>
+
+<Tab>
+```php
+use SignaKit\FlagsPhp\SignaKitClient;
+
+// Initialize once (register as a singleton in your DI container)
+$client = new SignaKitClient(sdkKey: $_ENV['SIGNAKIT_SDK_KEY']);
+$client->initialize();
+
+$userCtx = $client->createUserContext(
+    userId: 'user-123',
+    attributes: ['plan' => 'pro'],
+);
+
+$decision = $userCtx->decide('my-first-flag');
+
+if ($decision?->enabled) {
+    echo $decision->variationKey; // e.g. "treatment"
+}
+```
+</Tab>
+
+<Tab>
+```dart
+import 'package:flutter/material.dart';
+import 'package:signakit_flags/signakit_flags.dart';
+
+void main() {
+  runApp(
+    SignaKitProvider(
+      sdkKey: 'sk_dev_xxxx',
+      userId: 'user-123',
+      attributes: const {'plan': 'pro'},
+      child: const MyApp(),
+    ),
+  );
+}
+
+// Anywhere in the widget tree:
+FlagBuilder(
+  flagKey: 'my-first-flag',
+  builder: (context, flag) {
+    return flag.enabled ? const NewExperience() : const CurrentExperience();
+  },
+)
+```
+</Tab>
+
+<Tab>
+```tsx
+import { SignaKitProvider, useFlag } from '@signakit/flags-react-native'
+
+export default function App() {
+  return (
+    <SignaKitProvider sdkKey="sk_dev_xxxx" userId="user-123">
+      <MyScreen />
+    </SignaKitProvider>
+  )
+}
+
+function MyScreen() {
+  const { enabled, loading } = useFlag('my-first-flag')
+  if (loading) return <ActivityIndicator />
+  return enabled ? <NewExperience /> : <CurrentExperience />
+}
 ```
 </Tab>
 

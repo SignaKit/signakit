@@ -41,12 +41,12 @@ This means audience evaluation is as fast as any other flag evaluation.
 Define a user context with the attributes your audiences reference, then evaluate a flag normally. The audience matching happens automatically inside `decide()`.
 
 ```ts title="Node.js"
-import { createClient } from '@signakit/flags-node';
+import { createInstance } from '@signakit/flags-node';
 
-const signakit = createClient({ apiKey: process.env.SIGNAKIT_API_KEY });
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! });
 
 // Attributes are matched against audience rules at evaluation time.
-const user = signakit.createUserContext('user_abc123', {
+const user = client.createUserContext('user_abc123', {
   plan: 'beta',
   role: 'member',
   country: 'US',
@@ -55,9 +55,9 @@ const user = signakit.createUserContext('user_abc123', {
 
 // If "Beta Users" audience = { plan equals 'beta' OR role equals 'admin' }
 // this user matches because plan equals 'beta'.
-const enabled = await user.decide('new-dashboard');
+const decision = user.decide('new-dashboard');
 
-if (enabled) {
+if (decision?.enabled) {
   // show new dashboard
 }
 ```

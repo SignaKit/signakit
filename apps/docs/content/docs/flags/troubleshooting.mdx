@@ -1,0 +1,166 @@
+---
+title: Troubleshooting
+description: Diagnose and fix common SignaKit feature flag issues — decide() returning null, stale flags, missing exposures, and serverless gotchas.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+# Troubleshooting Feature Flags
+
+Most issues with SignaKit fall into a handful of categories. Start with the symptoms below — each includes the likely cause and the fix.
+
+<Callout type="info">
+  If you cannot find your issue here, verify your SDK version is current and your SDK key is correct for the environment you are testing in (development vs. production).
+</Callout>
+
+---
+
+## `decide()` Returns `null` or the Default Value
+
+`decide()` returns `null` when the SDK cannot produce a decision. This is always one of five causes:
+
+**1. SDK not initialized before calling `decide()`**
+
+The most common cause. The SDK fetches config asynchronously on startup — if you call `decide()` before `onReady()` resolves, the config is not yet in memory.
+
+```ts
+// Wrong — race condition
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+const decision = client.createUserContext('user-1').decide('my-flag') // may be null
+
+// Correct — wait for config
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+await client.onReady()
+const decision = client.createUserContext('user-1').decide('my-flag')
+```
+
+**2. Flag key does not match exactly**
+
+Flag keys are case-sensitive. `'My-Flag'` and `'my-flag'` are different keys. Copy the flag key directly from the SignaKit dashboard.
+
+**3. User does not match any targeting rule**
+
+If the flag uses targeting rules or audience conditions, a user who does not match any rule receives `null`. Test with a user whose attributes satisfy at least one rule, or temporarily set the flag to "On for everyone" to confirm the SDK connection is working.
+
+**4. Wrong SDK key or wrong environment**
+
+A `sk_dev_` key will not serve production flag data, and vice versa. Verify you are using the key that corresponds to the environment you are testing in.
+
+**5. Flag is disabled or archived**
+
+A newly created flag defaults to off. Check the flag status in the SignaKit dashboard — it must be set to "On" or have active targeting rules.
+
+---
+
+## Flag Changes Aren't Reflecting
+
+**Config is cached in memory.** The SDK fetches flag configuration once at startup and holds it for the process lifetime. Changes made in the dashboard take effect on the next SDK initialization (new process, next request for short-lived functions) or after a manual refresh.
+
+**Default refresh behavior by SDK:**
+
+| SDK | Default | How to force refresh |
+|---|---|---|
+| Node.js | Process lifetime | Restart process or call `client.refresh()` |
+| Browser | Page load | Reload page or call `client.refresh()` |
+| React | Component mount | Remount provider or call `client.refresh()` |
+| Python | Process lifetime | Restart process or call `await client.refresh()` |
+| Go | Process lifetime | Restart process or call `client.Refresh(ctx)` |
+
+**Long-lived server processes** may not see dashboard changes for hours unless you call the manual refresh method or configure a polling interval on initialization.
+
+---
+
+## Exposures Not Appearing in the Dashboard
+
+**1. `onReady()` was not awaited**
+
+If the SDK never successfully loaded config (`success: false`), no exposure events can be attributed to a valid flag assignment. Check that `onReady()` resolves with `success: true` before serving traffic.
+
+**2. User ID is inconsistent**
+
+Exposure events and conversion events must use the same user ID. If `decide()` is called with `'user-abc'` and `trackEvent()` is called with `'user-ABC'`, they will not be matched. Normalize user IDs before passing them to the SDK.
+
+**3. Event queue not flushed in serverless environments**
+
+In short-lived environments (AWS Lambda, Vercel Edge Functions, Cloudflare Workers), the event queue may not flush before the function exits. Call `await client.flush()` at the end of your handler before returning.
+
+---
+
+## Serverless and Lambda Issues
+
+Serverless functions introduce two common pitfalls:
+
+**Initialize at module level, not inside the handler**
+
+```ts
+// Wrong — creates a new client on every invocation, no caching
+export const handler = async (event) => {
+  const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+  await client.onReady()
+  // ...
+}
+
+// Correct — client is created once per container, reused across warm invocations
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+await client.onReady()
+
+export const handler = async (event) => {
+  // client is already initialized on warm starts
+}
+```
+
+**Flush events before the handler returns**
+
+```ts
+export const handler = async (event) => {
+  const userCtx = client.createUserContext(userId, attributes)
+  const decision = userCtx.decide('my-flag')
+
+  // ... handle request ...
+
+  userCtx.trackEvent('conversion')
+  await client.flush() // required — events are queued in memory
+  return response
+}
+```
+
+---
+
+## Frequently Asked Questions
+
+### Is there a way to force a specific variation for testing?
+
+Yes. The SignaKit dashboard supports user-level overrides — navigate to a flag, open the **Overrides** tab, and enter a user ID with the desired variation. This is the safest way to test a specific variation in any environment without changing the flag's targeting rules.
+
+### Can I use the same SDK key across environments?
+
+No. Each environment (development, staging, production) has its own SDK key. Using a development key in production will serve development flag data, which may be in a different state than your production flags. Always use environment-specific keys and store them in environment variables.
+
+### Why does my user always get the same variation?
+
+This is expected behavior. SignaKit uses deterministic bucketing — the same `userId` and `flagKey` always produce the same variation for the life of the experiment. This prevents users from seeing different experiences across sessions or servers. To test a different variation, use a different user ID or add a user-level override in the dashboard.
+
+### How do I debug flag evaluation locally?
+
+Enable debug logging on initialization:
+
+```ts
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  logLevel: 'debug',
+})
+```
+
+Debug logs include the config fetch result, each `decide()` evaluation trace (which rules were checked, which matched, which variation was assigned), and event queue activity.
+
+### Where can I get help if I'm still stuck?
+
+Check the [SDK Architecture](/docs/flags/concepts/sdk-architecture) page for a deeper understanding of how config fetch and evaluation work. For bugs or unexpected behavior, open an issue on the relevant SDK repository on GitHub (linked from each SDK reference page).
+
+---
+
+## Related
+
+- [SDK Architecture](/docs/flags/concepts/sdk-architecture) — config fetch, local evaluation, and the event pipeline
+- [Feature Flags](/docs/flags/concepts/feature-flags) — how flag evaluation and exposure tracking work
+- [Node.js SDK](/docs/flags/sdks/node) — full server-side SDK API reference

@@ -1,6 +1,6 @@
 ---
-title: A/B Testing
-description: Run controlled experiments with fixed traffic splits, measure conversion lift, and ship winners with statistical confidence.
+title: "A/B Testing: How It Works and How to Run Experiments"
+description: Learn how A/B testing works, how SignaKit handles bucketing and statistical analysis, and how to run your first controlled experiment.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout'
@@ -9,7 +9,15 @@ import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
 
 # A/B Testing
 
-An A/B test is a controlled experiment that exposes different users to different experiences and measures which one performs better. In SignaKit, every A/B test is a flag with multiple variations and a fixed traffic split. You define the split, call `decide()`, and SignaKit handles bucketing, exposure tracking, and results.
+## What is A/B Testing?
+
+A/B testing (also called split testing) is a method of comparing two or more versions of something — a feature, a UI design, a copy variant — by showing different versions to different users and measuring which performs better. Rather than making decisions based on intuition, A/B testing gives you statistical evidence: variation A converted at 3.2%, variation B converted at 4.1%, and the difference is statistically significant.
+
+The core principle is control vs. treatment. The control group sees the existing experience; the treatment group sees the new one. By splitting users randomly and measuring their behavior, you can attribute differences in outcomes to the change itself rather than to external factors.
+
+Key concepts to understand before running your first test: statistical significance (how confident you are the result is real, not random chance), sample size (how many users you need before the result is trustworthy), and peeking bias (why reading results early before collecting enough data leads to false conclusions). Each of these is covered in the sections below.
+
+In SignaKit, every A/B test is a flag with multiple variations and a fixed traffic split. You define the split, call `decide()`, and SignaKit handles bucketing, exposure tracking, and results.
 
 ---
 
@@ -157,7 +165,7 @@ switch (decision?.variationKey) {
 
 ---
 
-## How bucketing works
+## How Does SignaKit Assign Users to A/B Test Variations?
 
 SignaKit uses deterministic bucketing. When `decide()` is called for a given `userId` and `flagKey`, it hashes the two together to produce a stable bucket number. That number maps to a variation based on the traffic split.
 
@@ -186,7 +194,7 @@ Navigate to your flag and open the **Results** tab. For each variation you will 
 
 SignaKit uses a two-proportion z-test. When the p-value drops below 0.05 (95% confidence) and remains there, the dashboard surfaces a plain-English verdict: **"treatment is the winner"** or **"no significant difference detected."**
 
-### When to trust results
+### When Can You Trust Your A/B Test Results?
 
 Do not read results early and stop on the first promising p-value. A p-value below 0.05 at day two can easily reverse by day seven — this is called peeking bias. Guidelines:
 
@@ -250,6 +258,26 @@ Archive the flag in the dashboard to keep your flag list clean. Archived flags r
 ## A/B testing vs. multi-armed bandit
 
 A/B tests use a **fixed** traffic split for the duration of the experiment. This is appropriate when you want statistically rigorous results with a controlled sample. If you prefer to automatically shift traffic toward the better-performing variation as the experiment runs, use a [multi-armed bandit](/docs/flags/concepts/multi-armed-bandit) instead.
+
+---
+
+## Frequently Asked Questions
+
+### Can I change the traffic split of a running experiment?
+
+No — and you should not try. Changing a traffic split mid-experiment re-buckets some users into a different variation, contaminating your results. A user who saw control for the first three days and then gets switched to treatment produces measurement noise. If you need to stop a test early, disable the flag entirely rather than adjusting the split.
+
+### How many users do I need for a statistically valid A/B test?
+
+It depends on your baseline conversion rate and the minimum detectable effect (MDE) you want to measure. As a rough rule of thumb: if your baseline is 5% and you want to detect a 20% relative improvement (5% → 6%), you need approximately 5,000 users per variation. Use a sample size calculator before launching — if you cannot collect enough users in a reasonable timeframe, consider a [multi-armed bandit](/docs/flags/concepts/multi-armed-bandit) instead, which adapts without requiring a fixed sample size.
+
+### What is the difference between an exposure and a conversion event?
+
+An exposure is recorded automatically when `decide()` is called — it represents a user encountering the experiment. A conversion event is something you track explicitly with `trackEvent()` when a user completes the action you are measuring (a purchase, a signup, a click). SignaKit uses the ratio of conversions to exposures per variation to calculate conversion rates and lift.
+
+### What is peeking bias, and why does it matter?
+
+Peeking bias occurs when you read results early and stop the experiment as soon as you see a promising p-value. A p-value below 0.05 at day two can easily reverse by day seven due to natural variation in user behavior. The fix: decide your stopping criteria before the experiment starts, commit to a minimum sample size and a minimum run duration, and do not act on results until both are met.
 
 ---
 

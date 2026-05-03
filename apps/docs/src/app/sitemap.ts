@@ -1,6 +1,7 @@
 import type { MetadataRoute } from 'next'
 
 const BASE_URL = 'https://docs.signakit.com'
+const DOCS = `${BASE_URL}/docs`
 
 const flagsSdks = [
   'node', 'browser', 'react', 'react-native',
@@ -10,7 +11,7 @@ const flagsSdks = [
 const flagsConcepts = [
   'feature-flags', 'targeted-delivery', 'ab-testing',
   'multi-armed-bandit', 'audiences', 'events-and-metrics',
-  'environments', 'sdk-architecture',
+  'environments', 'user-ids', 'sdk-architecture',
 ]
 
 const flagsGuides = [
@@ -23,31 +24,25 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const now = new Date()
 
   const staticPages: MetadataRoute.Sitemap = [
-    { url: BASE_URL, lastModified: now, changeFrequency: 'weekly', priority: 1 },
-    { url: `${BASE_URL}/flags/quickstart`, lastModified: now, changeFrequency: 'weekly', priority: 0.9 },
-    { url: `${BASE_URL}/flags/changelog`, lastModified: now, changeFrequency: 'weekly', priority: 0.7 },
-    { url: `${BASE_URL}/events`, lastModified: now, changeFrequency: 'monthly', priority: 0.4 },
+    { url: BASE_URL, lastModified: now },
+    { url: `${DOCS}/flags`, lastModified: now },
+    { url: `${DOCS}/flags/quickstart`, lastModified: now },
+    { url: `${DOCS}/flags/changelog`, lastModified: now },
   ]
 
   const sdkPages: MetadataRoute.Sitemap = flagsSdks.map((sdk) => ({
-    url: `${BASE_URL}/flags/sdks/${sdk}`,
+    url: `${DOCS}/flags/sdks/${sdk}`,
     lastModified: now,
-    changeFrequency: 'weekly',
-    priority: 0.9,
   }))
 
   const conceptPages: MetadataRoute.Sitemap = flagsConcepts.map((concept) => ({
-    url: `${BASE_URL}/flags/concepts/${concept}`,
+    url: `${DOCS}/flags/concepts/${concept}`,
     lastModified: now,
-    changeFrequency: 'monthly',
-    priority: 0.8,
   }))
 
   const guidePages: MetadataRoute.Sitemap = flagsGuides.map((guide) => ({
-    url: `${BASE_URL}/flags/guides/${guide}`,
+    url: `${DOCS}/flags/guides/${guide}`,
     lastModified: now,
-    changeFrequency: 'monthly',
-    priority: 0.85,
   }))
 
   return [...staticPages, ...sdkPages, ...conceptPages, ...guidePages]

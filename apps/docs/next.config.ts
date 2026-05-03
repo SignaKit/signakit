@@ -3,6 +3,7 @@ import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  poweredByHeader: false,
   serverExternalPackages: [
     'ts-morph',
     'typescript',
@@ -36,7 +37,7 @@ const nextConfig: NextConfig = {
       {
         source: '/docs',
         destination: '/docs/flags',
-        permanent: false,
+        permanent: true,
       },
     ]
   },
