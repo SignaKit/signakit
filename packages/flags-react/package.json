@@ -1,6 +1,6 @@
 {
   "name": "@signakit/flags-react",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Official React SDK for SignaKit Feature Flags",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -11,7 +11,9 @@
       "require": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
@@ -23,7 +25,13 @@
     "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["feature-flags", "signakit", "react", "ab-testing", "experimentation"],
+  "keywords": [
+    "feature-flags",
+    "signakit",
+    "react",
+    "ab-testing",
+    "experimentation"
+  ],
   "author": "SignaKit",
   "license": "MIT",
   "repository": {
