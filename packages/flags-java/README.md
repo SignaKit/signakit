@@ -73,3 +73,4 @@ mvn -q test
   uses. Test vectors in `HasherTest` lock this in.
 - Bucket space is 10000 (0.01% granularity).
 - Hash namespaces: `{salt}:traffic`, `{salt}:variation`, `{salt}:default`.
+
