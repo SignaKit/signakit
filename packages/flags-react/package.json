@@ -44,7 +44,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@signakit/flags-browser": ">=0.1.0",
+    "@signakit/flags-browser": ">=1.0.0",
     "react": ">=18.0.0"
   },
   "devDependencies": {
