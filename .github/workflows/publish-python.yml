@@ -1,0 +1,73 @@
+name: Publish Python
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: publish-python
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      flags-python: ${{ steps.filter.outputs.flags-python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            flags-python:
+              - 'packages/flags-python/**'
+
+  publish-flags-python:
+    name: Publish flags-python
+    needs: changes
+    if: needs.changes.outputs.flags-python == 'true'
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep '^version' packages/flags-python/pyproject.toml | head -1 | awk -F'"' '{print $2}')
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if version already published
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/signakit-flags/${VERSION}/json")
+          if [ "$STATUS" = "200" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION already published — skipping."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install build dependencies
+        if: steps.check.outputs.exists == 'false'
+        run: pip install build
+
+      - name: Build
+        if: steps.check.outputs.exists == 'false'
+        working-directory: packages/flags-python
+        run: python -m build
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/flags-python/dist/
