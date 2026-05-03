@@ -1,0 +1,168 @@
+name: Publish NPM
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect which npm packages changed.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      flags-node:         ${{ steps.filter.outputs.flags-node }}
+      flags-browser:      ${{ steps.filter.outputs.flags-browser }}
+      flags-react:        ${{ steps.filter.outputs.flags-react }}
+      flags-react-native: ${{ steps.filter.outputs.flags-react-native }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            flags-node:
+              - 'packages/flags-node/**'
+            flags-browser:
+              - 'packages/flags-browser/**'
+            flags-react:
+              - 'packages/flags-react/**'
+            flags-react-native:
+              - 'packages/flags-react-native/**'
+
+  # ---------------------------------------------------------------------------
+  # Publish jobs — each only runs when its package changed, and skips if the
+  # version in package.json is already published on npm (idempotent).
+  # ---------------------------------------------------------------------------
+  publish-flags-node:
+    name: Publish flags-node
+    needs: changes
+    if: needs.changes.outputs.flags-node == 'true'
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/flags-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: packages/flags-node/package-lock.json
+      - run: npm ci
+      - name: Publish if version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "Version $VERSION already published — skipping."
+          else
+            npm publish --provenance --access public
+          fi
+
+  publish-flags-browser:
+    name: Publish flags-browser
+    needs: changes
+    if: needs.changes.outputs.flags-browser == 'true'
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/flags-browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: packages/flags-browser/package-lock.json
+      - run: npm ci
+      - name: Publish if version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "Version $VERSION already published — skipping."
+          else
+            npm publish --provenance --access public
+          fi
+
+  # flags-react has flags-browser as a peer dep — wait for it if it ran.
+  publish-flags-react:
+    name: Publish flags-react
+    needs: [changes, publish-flags-browser]
+    if: |
+      always() &&
+      needs.changes.outputs.flags-react == 'true' &&
+      (needs.publish-flags-browser.result == 'success' || needs.publish-flags-browser.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/flags-react
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: packages/flags-react/package-lock.json
+      - run: npm ci
+      - name: Publish if version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "Version $VERSION already published — skipping."
+          else
+            npm publish --provenance --access public
+          fi
+
+  publish-flags-react-native:
+    name: Publish flags-react-native
+    needs: changes
+    if: needs.changes.outputs.flags-react-native == 'true'
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/flags-react-native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: packages/flags-react-native/package-lock.json
+      - run: npm ci
+      - name: Publish if version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "Version $VERSION already published — skipping."
+          else
+            npm publish --provenance --access public
+          fi
