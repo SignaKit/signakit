@@ -1,0 +1,125 @@
+name: Publish Composer
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: publish-composer
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect which composer packages changed.
+  # flags-laravel also triggers on flags-php changes (local path dependency).
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      flags-php:     ${{ steps.filter.outputs.flags-php }}
+      flags-laravel: ${{ steps.filter.outputs.flags-laravel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            flags-php:
+              - 'packages/flags-php/**'
+            flags-laravel:
+              - 'packages/flags-laravel/**'
+              - 'packages/flags-php/**'
+
+  # ---------------------------------------------------------------------------
+  # Publish jobs — split the subdirectory to its dedicated repo and tag it.
+  # Skips if the version tag already exists on the split repo (idempotent).
+  # Requires a GH_PAT secret with repo scope to push to the split repos.
+  # ---------------------------------------------------------------------------
+  publish-flags-php:
+    name: Publish flags-php
+    needs: changes
+    if: needs.changes.outputs.flags-php == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Read version
+        id: version
+        run: echo "value=$(jq -r .version packages/flags-php/composer.json)" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists on split repo
+        id: check
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          if git ls-remote --tags "https://github.com/signakit/flags-php.git" | grep -q "refs/tags/$TAG$"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $TAG already published — skipping."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Split, push, and tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          git subtree split --prefix=packages/flags-php -b split/flags-php
+          git push "https://x-access-token:${GH_PAT}@github.com/signakit/flags-php.git" split/flags-php:main
+          git tag "$TAG" split/flags-php
+          git push "https://x-access-token:${GH_PAT}@github.com/signakit/flags-php.git" "$TAG"
+          git branch -D split/flags-php
+
+  # flags-laravel depends on flags-php — wait for it if it ran.
+  publish-flags-laravel:
+    name: Publish flags-laravel
+    needs: [changes, publish-flags-php]
+    if: |
+      always() &&
+      needs.changes.outputs.flags-laravel == 'true' &&
+      (needs.publish-flags-php.result == 'success' || needs.publish-flags-php.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Read version
+        id: version
+        run: echo "value=$(jq -r .version packages/flags-laravel/composer.json)" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists on split repo
+        id: check
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          if git ls-remote --tags "https://github.com/signakit/flags-laravel.git" | grep -q "refs/tags/$TAG$"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $TAG already published — skipping."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Split, push, and tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          TAG="v${{ steps.version.outputs.value }}"
+          git subtree split --prefix=packages/flags-laravel -b split/flags-laravel
+          git push "https://x-access-token:${GH_PAT}@github.com/signakit/flags-laravel.git" split/flags-laravel:main
+          git tag "$TAG" split/flags-laravel
+          git push "https://x-access-token:${GH_PAT}@github.com/signakit/flags-laravel.git" "$TAG"
+          git branch -D split/flags-laravel
