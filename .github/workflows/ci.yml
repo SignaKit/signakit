@@ -9,9 +9,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
   # Detect which packages changed so downstream jobs can be conditional.
-  # -------------------------------------------------------------------------
+  # flags-react also triggers on flags-browser changes (local peer dep).
+  # flags-laravel also triggers on flags-php changes (local path dep).
+  # ---------------------------------------------------------------------------
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -38,12 +40,14 @@ jobs:
               - 'packages/flags-browser/**'
             flags-react:
               - 'packages/flags-react/**'
+              - 'packages/flags-browser/**'
             flags-react-native:
               - 'packages/flags-react-native/**'
             flags-php:
               - 'packages/flags-php/**'
             flags-laravel:
               - 'packages/flags-laravel/**'
+              - 'packages/flags-php/**'
             flags-flutter:
               - 'packages/flags-flutter/**'
             flags-python:
@@ -53,9 +57,9 @@ jobs:
             flags-java:
               - 'packages/flags-java/**'
 
-  # -------------------------------------------------------------------------
-  # SDK test jobs — each only runs when its package changed.
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # SDK test jobs
+  # ---------------------------------------------------------------------------
   test-flags-node:
     name: Test flags-node
     needs: changes
@@ -72,7 +76,10 @@ jobs:
           cache: npm
           cache-dependency-path: packages/flags-node/package-lock.json
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
       - run: npm test
+      - run: npm run build
 
   test-flags-browser:
     name: Test flags-browser
@@ -90,12 +97,18 @@ jobs:
           cache: npm
           cache-dependency-path: packages/flags-browser/package-lock.json
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
       - run: npm test
+      - run: npm run build
 
   test-flags-react:
     name: Test flags-react
-    needs: changes
-    if: needs.changes.outputs.flags-react == 'true'
+    needs: [changes, test-flags-browser]
+    if: |
+      always() &&
+      needs.changes.outputs.flags-react == 'true' &&
+      (needs.test-flags-browser.result == 'success' || needs.test-flags-browser.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -106,9 +119,17 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: packages/flags-react/package-lock.json
+          cache-dependency-path: |
+            packages/flags-browser/package-lock.json
+            packages/flags-react/package-lock.json
+      - name: Build flags-browser (local peer dependency)
+        working-directory: packages/flags-browser
+        run: npm ci && npm run build
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
       - run: npm test
+      - run: npm run build
 
   test-flags-react-native:
     name: Test flags-react-native
@@ -126,7 +147,10 @@ jobs:
           cache: npm
           cache-dependency-path: packages/flags-react-native/package-lock.json
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
       - run: npm test
+      - run: npm run build
 
   test-flags-php:
     name: Test flags-php
@@ -140,15 +164,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
-          coverage: none
-      - run: composer install --no-progress --prefer-dist
-      - run: ./vendor/bin/phpunit
+          php-version: '8.3'
+          extensions: json, curl
+          coverage: xdebug
+      - run: composer install --prefer-dist --no-progress
+      - run: vendor/bin/phpunit
 
   test-flags-laravel:
     name: Test flags-laravel
-    needs: changes
-    if: needs.changes.outputs.flags-laravel == 'true'
+    needs: [changes, test-flags-php]
+    if: |
+      always() &&
+      needs.changes.outputs.flags-laravel == 'true' &&
+      (needs.test-flags-php.result == 'success' || needs.test-flags-php.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -157,10 +185,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
-          coverage: none
-      - run: composer install --no-progress --prefer-dist
-      - run: ./vendor/bin/phpunit
+          php-version: '8.3'
+          extensions: json, curl
+          coverage: xdebug
+      - name: Install dependencies
+        run: |
+          composer config repositories.flags-php '{"type":"path","url":"../flags-php","options":{"symlink":false}}'
+          composer config minimum-stability dev
+          composer config prefer-stable true
+          composer require 'signakit/flags-php:*@dev' --no-update
+          composer install --prefer-dist --no-progress
+      - run: vendor/bin/phpunit
 
   test-flags-flutter:
     name: Test flags-flutter
@@ -195,7 +230,10 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: packages/flags-python/pyproject.toml
       - run: pip install -e ".[dev]"
+      - run: mypy
+      - run: ruff check src tests
       - run: pytest
 
   test-flags-golang:
@@ -232,10 +270,10 @@ jobs:
           cache: maven
       - run: mvn --batch-mode test
 
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
   # Gate job — always runs, fails if any test job failed or was cancelled.
   # Add "CI / Gate" as the single required status check in branch protection.
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
   gate:
     name: Gate
     runs-on: ubuntu-latest
