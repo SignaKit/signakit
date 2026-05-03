@@ -1,17 +1,25 @@
 ---
-title: Feature Flags
-description: How SignaKit evaluates feature flags — config fetch, local evaluation, and exposure tracking.
+title: "Feature Flags: What They Are and How They Work"
+description: Learn what feature flags are, why engineering teams use them, and how SignaKit evaluates flags locally for sub-millisecond decisions.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout'
 
 # Feature Flags
 
-A feature flag is a named boolean gate — and optionally a variation and set of variables — that your code checks at runtime to decide what behavior to show a user. SignaKit evaluates flags entirely in memory, so every `decide()` call is a fast, synchronous operation with no network round-trip.
+## What is a Feature Flag?
+
+A feature flag (also called a feature toggle or feature switch) is a software development technique that lets you change your application's behavior at runtime without deploying new code. Instead of shipping a feature to all users at once, you wrap it in a conditional check — a flag — and control who sees it from a dashboard.
+
+Engineering teams use feature flags to decouple deployment from release: you can merge and ship code to production while keeping a feature off, then gradually enable it for 1%, 10%, or 100% of users. When something goes wrong, you flip the flag off and the problem disappears instantly — no hotfix, no rollback, no deployment.
+
+Common use cases include gradual rollouts, A/B testing (showing different experiences to different user segments and measuring which performs better), kill switches for risky features, and beta access programs where early adopters opt into new functionality before general availability.
+
+In SignaKit, a feature flag is a named boolean gate — and optionally a variation and set of variables — that your code checks at runtime to decide what behavior to show a user. SignaKit evaluates flags entirely in memory, so every `decide()` call is a fast, synchronous operation with no network round-trip.
 
 ---
 
-## How it works
+## How Does SignaKit Evaluate Feature Flags?
 
 SignaKit uses a fetch-once, evaluate-locally model.
 
@@ -135,7 +143,7 @@ A flag in SignaKit is always in one of three states:
 
 ---
 
-## Exposure tracking
+## How Does Exposure Tracking Work?
 
 When `decide()` is called for the first time for a given user and flag combination, the SDK automatically fires an `$exposure` event. This happens asynchronously in the background — it does not block the return value or add latency to your code path.
 
@@ -158,6 +166,26 @@ You do not need to instrument exposures manually. As long as you call `decide()`
 <Callout type="info">
   Exposure events are batched and sent to the SignaKit event ingestion endpoint. They do not slow down flag evaluation — the evaluation itself is always a pure in-memory operation.
 </Callout>
+
+---
+
+## Frequently Asked Questions
+
+### Does `decide()` make a network request?
+
+No. `decide()` is a pure in-memory operation. The SDK fetches the flag configuration once when you call `onReady()`, stores it in memory, and all subsequent `decide()` calls read from that in-memory cache. There is no network activity on the evaluation path.
+
+### What happens if a flag key doesn't exist?
+
+`decide()` returns `null`. Treat `null` as the default/off state — your code should always handle this case: `if (decision?.enabled) { ... }`. If you are seeing unexpected `null` returns, check that the flag key in your code exactly matches the key in the SignaKit dashboard (keys are case-sensitive).
+
+### How quickly do flag changes propagate to the SDK?
+
+Changes appear on the next SDK initialization or config refresh. Long-lived server processes hold the config in memory for the process lifetime by default — call `client.refresh()` to pull the latest config without restarting. Browser and mobile SDKs refresh on page load or app launch. For fastest propagation in production, configure a polling interval on initialization.
+
+### Can I use feature flags in serverless functions?
+
+Yes, with one important rule: initialize the client at module level, not inside the handler. Module-level initialization runs once per container and is reused across warm invocations. Initializing inside the handler creates a new client on every request, which is expensive and defeats the config-caching benefit. See the [Troubleshooting](/docs/flags/troubleshooting) page for serverless-specific patterns.
 
 ---
 

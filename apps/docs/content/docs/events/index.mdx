@@ -1,22 +1,51 @@
 ---
-title: Introduction
-description: Custom event tracking and analytics for web and mobile — coming soon.
+title: Events
+description: Track custom user actions — clicks, purchases, form submissions, and feature usage — as conversion metrics for A/B tests and experiments.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout'
 
 # SignaKit Events
 
-<Callout type="info" title="Coming soon">
-  SignaKit Events documentation is under development. The Events SDKs for Node.js, browser, and React are in progress.
-</Callout>
+SignaKit Events is a system for tracking custom user actions — clicks, purchases, form submissions, and feature usage — as named analytics events with flexible key-value properties. Events serve as the conversion metrics that close the feedback loop between feature flag decisions and measured outcomes. When a user is assigned to a flag variation, SignaKit matches their subsequent events to that assignment, so you always know which variation drove a conversion, a purchase, or any other action you care about. Without event tracking, experimentation is guesswork; with it, every flag decision is backed by real behavioral data.
 
-Custom event tracking and analytics for web and mobile. SignaKit Events lets you track any user action — button clicks, purchases, form submissions — with flexible properties and server-side or client-side SDKs.
+---
 
-**Planned SDKs:**
+## How Events Work
 
-- `@signakit/events-node` — server-side event tracking
-- `@signakit/events-browser` — client-side event tracking
-- `@signakit/events-react` — React wrapper
+Tracking an event requires a single call from any SignaKit SDK:
 
-Want to be notified when Events docs are ready? Watch the [changelog](/flags/changelog) for updates.
+```ts
+userCtx.trackEvent('purchase_completed', { revenue: 49.99, plan: 'pro' })
+```
+
+From there, the SDK handles everything else:
+
+1. The event is queued in an in-memory buffer — `trackEvent()` returns immediately and never blocks your application.
+2. The SDK flushes the buffer asynchronously to the SignaKit ingestion API in batches, minimizing network overhead.
+3. The ingestion pipeline matches each event to the user's active flag assignments by user ID.
+4. Conversion rates are computed per variation and surfaced in the experiment results dashboard.
+
+Because `trackEvent()` is fully non-blocking, it adds zero latency to your hot paths — the call returns before any network activity occurs.
+
+---
+
+## Event Types
+
+SignaKit supports three categories of events. You define the event names; SignaKit handles storage, matching, and aggregation.
+
+| Event type | Example | Use case |
+|---|---|---|
+| Conversion event | `purchase_completed` | Primary success metric for an A/B test or bandit experiment |
+| Behavioral event | `feature_used`, `page_viewed` | General product analytics and funnel analysis |
+| Custom properties | `{ revenue: 49.99, plan: 'pro' }` | Key-value metadata attached to any event for segmentation and filtering |
+
+Conversion events are the most important category for experimentation — they are the signals SignaKit uses to calculate which flag variation is winning. Behavioral events provide supporting context. Custom properties let you attach arbitrary metadata to any event without changing the event schema.
+
+---
+
+## Coming Soon
+
+The SignaKit Events dashboard and dedicated Events SDK documentation are actively in development. Full docs — including SDK references for `@signakit/events-node`, `@signakit/events-browser`, and `@signakit/events-react` — will be published here when the dashboard launches.
+
+In the meantime, `trackEvent()` is available in all current SignaKit SDKs today. See the [Node.js SDK reference](/docs/flags/sdks/node) for the full API, including event batching configuration and flush behavior.
