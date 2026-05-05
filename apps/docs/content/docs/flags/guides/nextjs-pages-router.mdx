@@ -14,6 +14,15 @@ import { Tabs, Tab } from 'fumadocs-ui/components/tabs'
 
 In the Pages Router there are no server components — every component that renders in the browser is a client component. Flags must therefore be evaluated in data-fetching functions (`getServerSideProps`, `getStaticProps`) and passed down as props. The recommended primary pattern is `getServerSideProps`: it runs per-request on the server, has access to cookies and headers, and keeps your SDK key out of the browser bundle.
 
+<Callout type="info" title="Simpler setup than App Router">
+Pages Router uses **webpack**, not Turbopack. This means modules are evaluated once on cold start and stay in memory — there is no Turbopack module re-evaluation to guard against, and fetch calls are not tied to a request's async lifecycle. As a result:
+
+- Exposure events sent fire-and-forget are reliable — they are not aborted when the response is sent.
+- The `globalThis` guard in `lib/signakit.ts` is still recommended for dev HMR resilience, but is not strictly required in production.
+- `@signakit/flags-node/next` (the `/next` subpath that wires `after()`) is **not needed**. Use the base `@signakit/flags-node` import.
+- `instrumentation.ts` is optional but a good practice. On v14 it requires `experimental: { instrumentationHook: true }` in `next.config.ts`.
+</Callout>
+
 ---
 
 ## Setup
@@ -40,7 +49,7 @@ SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
 
 ### Create a module-level singleton
 
-Create the client once so it is shared across all requests in the same process. In Next.js this module is evaluated once per server cold start — the config fetch happens immediately and is resolved by the time the first request arrives.
+Create the client once so it is shared across all requests in the same process. With webpack (Pages Router's bundler), this module is evaluated once per server cold start — the config fetch happens immediately and is resolved by the time the first request arrives.
 
 ```ts title="lib/signakit.ts"
 import { createInstance } from '@signakit/flags-node'

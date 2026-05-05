@@ -1,6 +1,6 @@
 ---
 title: Next.js Middleware
-description: Use SignaKit feature flags in Next.js proxy (middleware) to rewrite routes for A/B tests, gate beta access, and enforce maintenance mode — all before a page renders.
+description: Use SignaKit feature flags in Next.js middleware to rewrite routes for A/B tests, gate beta access, and enforce maintenance mode — all before a page renders.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout'
@@ -9,18 +9,20 @@ import { Steps, Step } from 'fumadocs-ui/components/steps'
 # Next.js Middleware
 
 **SDK:** `@signakit/flags-node`
-**Next.js version:** 16+ (proxy.ts)
+**Next.js version:** 13+ (middleware / proxy)
 
-Next.js proxy runs at the edge, before any page renders. That makes it the right place to:
+Next.js middleware runs at the edge, before any page renders. That makes it the right place to:
 
 - **A/B test page implementations** — rewrite `/checkout` to `/checkout-v2` for the treatment group without the user seeing a URL change
 - **Gate beta access** — redirect users who lack the flag to a waitlist page
 - **Enforce maintenance mode** — redirect all traffic to a status page when a flag is on
 
-Proxy evaluates flags synchronously on the request path, so keep decisions fast and targeted. Only the routes that actually need a flag should pass through the proxy function.
+Middleware evaluates flags synchronously on the request path, so keep decisions fast and targeted. Only the routes that actually need a flag should pass through the middleware function.
 
-<Callout type="info" title="proxy.ts in Next.js 16">
-Starting with Next.js 16, `middleware.ts` has been renamed to `proxy.ts`. The file lives at the project root (or inside `src/` if you use that layout). The API is identical — `NextRequest`, `NextResponse`, and the `config` export with `matcher` work exactly as before. Only the filename changed.
+<Callout type="info" title="Version compatibility">
+**Filename:** Next.js 16 renamed `middleware.ts` to `proxy.ts`. On v15 and below, your file should be named `middleware.ts` and the exported function `middleware`. The API (`NextRequest`, `NextResponse`, `config.matcher`) is identical across all versions.
+
+**`after()` does not apply here.** Middleware runs in the Edge Runtime, where `after()` is not available. Always use the base `@signakit/flags-node` import (not `/next`) for your middleware singleton. Exposure events in middleware are fire-and-forget — and since middleware should only evaluate `targeted` rules (feature flags, not A/B tests), no exposure events are fired at all.
 </Callout>
 
 ---
@@ -109,11 +111,13 @@ If `visitor_id` is absent (first visit), generate one and set it on the response
 
 Use `NextResponse.rewrite()` to transparently serve a different page implementation. The URL in the browser does not change — only the file that Next.js renders switches.
 
-```ts title="proxy.ts"
+```ts title="proxy.ts (Next.js 16) / middleware.ts (Next.js 13–15)"
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { signakit, signakitReady } from '@/lib/signakit'
 
+// Next.js 16: export function proxy(request: NextRequest)
+// Next.js 13–15: export function middleware(request: NextRequest)
 export async function proxy(request: NextRequest) {
   await signakitReady
 
@@ -133,7 +137,7 @@ export const config = {
 }
 ```
 
-The `matcher` is scoped to `/checkout` only. Proxy does not run on any other route, so there is no per-request overhead for unrelated traffic.
+The `matcher` is scoped to `/checkout` only. Middleware does not run on any other route, so there is no per-request overhead for unrelated traffic.
 
 <Callout type="info">
 The rewrite target (`/checkout-v2`) does not have to be a public URL. You can place it under `app/(experiments)/checkout-v2/page.tsx` and it will never be directly accessible — only reachable through the proxy rewrite.

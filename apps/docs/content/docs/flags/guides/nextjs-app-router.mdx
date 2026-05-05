@@ -1,6 +1,6 @@
 ---
 title: Next.js App Router
-description: Integrate SignaKit feature flags into a Next.js 15 App Router application — evaluate flags in server components, pass results to client components, and track conversions.
+description: Integrate SignaKit feature flags into a Next.js App Router application — evaluate flags in server components, pass results to client components, and track conversions.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout'
@@ -9,9 +9,18 @@ import { Steps, Step } from 'fumadocs-ui/components/steps'
 # Next.js App Router
 
 **SDK:** `@signakit/flags-node`
-**Next.js version:** 15+ (App Router)
+**Next.js version:** 14+ (App Router)
 
 The recommended pattern for Next.js App Router is to evaluate flags in **server components**, then pass the result as a prop to any client components that need it. This keeps flag evaluation on the server — zero client bundle cost, no hydration mismatch, no loading state.
+
+<Callout type="info" title="Version compatibility">
+This guide is written for **Next.js v15 and v16** (Turbopack). If you are on **v14**, two things differ:
+
+- **Import:** Use `@signakit/flags-node` (base import) instead of `@signakit/flags-node/next`. The `/next` subpath relies on `after()` from `next/server`, which does not exist in v14. The base import works fine — exposure events are fire-and-forget, which is reliable with webpack (v14's bundler).
+- **`instrumentation.ts`:** Requires an opt-in flag in `next.config.ts`: `experimental: { instrumentationHook: true }`.
+
+The `globalThis` singleton pattern, `await signakitReady`, and all flag evaluation code are identical across all versions.
+</Callout>
 
 ---
 
@@ -89,6 +98,19 @@ export async function register() {
 ```
 
 Place `instrumentation.ts` at the project root (same level as `package.json`). The `NEXT_RUNTIME === 'nodejs'` guard ensures it only runs in the Node.js runtime, not the Edge runtime used by `proxy.ts`.
+
+<Callout type="info" title="Next.js v14: opt in to instrumentation">
+`instrumentation.ts` is stable in v15+. On v14, add this to your `next.config.ts` to enable it:
+
+```ts title="next.config.ts"
+const nextConfig = {
+  experimental: {
+    instrumentationHook: true,
+  },
+}
+export default nextConfig
+```
+</Callout>
 
 </Step>
 
