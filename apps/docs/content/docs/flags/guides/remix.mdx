@@ -116,7 +116,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   const { visitorId, setCookie } = await getOrCreateVisitorId(request)
   const userCtx = signakit.createUserContext(visitorId)
-  const checkout = userCtx.decide('checkout-redesign')
+  const checkout = userCtx?.decide('checkout-redesign')
 
   const headers: Record<string, string> = {}
   if (setCookie) {
@@ -156,7 +156,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     $userAgent: request.headers.get('User-Agent') ?? undefined,
   })
 
-  const checkout = userCtx.decide('checkout-redesign')
+  const checkout = userCtx?.decide('checkout-redesign')
   // ...
 }
 ```
@@ -183,7 +183,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   await signakitReady
   const { visitorId, setCookie } = await getOrCreateVisitorId(request)
   const userCtx = signakit.createUserContext(visitorId)
-  const checkout = userCtx.decide('checkout-redesign')
+  const checkout = userCtx?.decide('checkout-redesign')
 
   const headers: Record<string, string> = {}
   if (setCookie) headers['Set-Cookie'] = setCookie
@@ -200,7 +200,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const { visitorId } = await getOrCreateVisitorId(request)
   const userCtx = signakit.createUserContext(visitorId)
-  await userCtx.trackEvent('purchase_completed', { value: amount })
+  await userCtx?.trackEvent('purchase_completed', { value: amount })
 
   return redirect('/checkout/confirmation')
 }
@@ -242,9 +242,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const { visitorId, setCookie } = await getOrCreateVisitorId(request)
   const userCtx = signakit.createUserContext(visitorId)
 
-  const newNav = userCtx.decide('redesigned-nav')
-  const betaDashboard = userCtx.decide('beta-dashboard')
-  const pricingTable = userCtx.decide('new-pricing-table')
+  const newNav = userCtx?.decide('redesigned-nav')
+  const betaDashboard = userCtx?.decide('beta-dashboard')
+  const pricingTable = userCtx?.decide('new-pricing-table')
 
   const headers: Record<string, string> = {}
   if (setCookie) headers['Set-Cookie'] = setCookie
@@ -290,7 +290,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   const { visitorId } = await getOrCreateVisitorId(request)
   const userCtx = signakit.createUserContext(visitorId)
-  const onboarding = userCtx.decide('onboarding-flow')
+  const onboarding = userCtx?.decide('onboarding-flow')
 
   return json({ onboardingVariation: onboarding?.variationKey ?? 'control' })
 }
@@ -325,7 +325,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   const { visitorId } = await getOrCreateVisitorId(request)
   const userCtx = signakit.createUserContext(visitorId)
-  const betaAccess = userCtx.decide('beta-dashboard')
+  const betaAccess = userCtx?.decide('beta-dashboard')
 
   if (!betaAccess?.enabled) {
     throw redirect('/')

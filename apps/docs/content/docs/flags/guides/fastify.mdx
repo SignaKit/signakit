@@ -154,7 +154,7 @@ const checkoutRoutes: FastifyPluginAsync = async (fastify) => {
       $userAgent: request.headers['user-agent'],
     })
 
-    const checkout = userCtx.decide('checkout-redesign')
+    const checkout = userCtx?.decide('checkout-redesign')
 
     return reply.send({
       variant: checkout?.variationKey ?? 'control',
@@ -189,7 +189,7 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
       $userAgent: request.headers['user-agent'],
     })
 
-    const newDashboard = userCtx.decide('new-dashboard')
+    const newDashboard = userCtx?.decide('new-dashboard')
 
     return reply.send({
       showNewDashboard: newDashboard?.enabled ?? false,
@@ -216,7 +216,7 @@ const orderRoutes: FastifyPluginAsync = async (fastify) => {
     // ... your order creation logic ...
 
     const userCtx = fastify.signakit.createUserContext(request.userId)
-    await userCtx.trackEvent('purchase_completed', { value: total })
+    await userCtx?.trackEvent('purchase_completed', { value: total })
 
     return reply.status(201).send({ success: true })
   })
@@ -239,7 +239,7 @@ import type { FastifyPluginAsync } from 'fastify'
 const homepageRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get('/', async (request, reply) => {
     const userCtx = fastify.signakit.createUserContext(request.userId)
-    const hero = userCtx.decide('homepage-hero')
+    const hero = userCtx?.decide('homepage-hero')
 
     switch (hero?.variationKey) {
       case 'treatment-a':
@@ -306,7 +306,7 @@ if (!success) {
 
 ```ts
 // Always safe — decide() returns null if the client is not ready
-const decision = userCtx.decide('my-flag')
+const decision = userCtx?.decide('my-flag')
 const featureEnabled = decision?.enabled ?? false
 ```
 

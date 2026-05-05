@@ -95,7 +95,7 @@ export class SignakitService {
 
   decide(userId: string, flagKey: string, attributes?: Record<string, string | number | boolean>): SignaKitDecision | null {
     const userCtx = this.client.createUserContext(userId, attributes)
-    return userCtx.decide(flagKey)
+    return userCtx?.decide(flagKey) ?? null
   }
 
   async trackEvent(
@@ -285,8 +285,8 @@ export class UsersController {
       $userAgent: request.headers['user-agent'] ?? '',
     })
 
-    const newDashboard = userCtx.decide('new-dashboard')
-    const analyticsTab = userCtx.decide('analytics-tab')
+    const newDashboard = userCtx?.decide('new-dashboard')
+    const analyticsTab = userCtx?.decide('analytics-tab')
 
     return {
       showNewDashboard: newDashboard?.enabled ?? false,

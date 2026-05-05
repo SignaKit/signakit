@@ -331,7 +331,7 @@ export default async function CheckoutPage() {
     // pass any user attributes available server-side
   })
 
-  const checkout = userCtx.decide('checkout-redesign')
+  const checkout = userCtx?.decide('checkout-redesign')
 
   return checkout?.variationKey === 'treatment'
     ? <CheckoutV2 />
