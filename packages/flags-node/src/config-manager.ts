@@ -19,6 +19,7 @@ export class ConfigManager {
   private orgId: string
   private projectId: string
   private environment: Environment
+  private pollingTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: ConfigManagerOptions) {
     this.orgId = options.orgId
@@ -85,6 +86,34 @@ export class ConfigManager {
    */
   getConfig(): ProjectConfig | null {
     return this.config
+  }
+
+  /**
+   * Start polling for config updates on a fixed interval.
+   * Uses ETags so a no-op poll is a lightweight conditional GET (304).
+   * The timer is unref'd so it won't keep the Node.js process alive.
+   */
+  startPolling(intervalMs: number): void {
+    if (this.pollingTimer !== null) return
+    this.pollingTimer = setInterval(async () => {
+      try {
+        await this.fetchConfig()
+      } catch {
+        // Polling errors are silent — stale config is better than a crash
+      }
+    }, intervalMs)
+    // Don't prevent Node from exiting cleanly when the app is done
+    this.pollingTimer.unref()
+  }
+
+  /**
+   * Stop the polling loop.
+   */
+  stopPolling(): void {
+    if (this.pollingTimer !== null) {
+      clearInterval(this.pollingTimer)
+      this.pollingTimer = null
+    }
   }
 }
 
