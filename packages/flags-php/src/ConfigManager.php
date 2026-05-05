@@ -25,6 +25,9 @@ final class ConfigManager
 
     private ?ProjectConfig $cachedConfig = null;
 
+    /** Unix timestamp (float) of the last successful fetch, or 0.0 if never fetched. */
+    private float $lastFetchedAt = 0.0;
+
     public function __construct(
         private readonly string $sdkKey,
         private readonly HttpClientInterface $httpClient,
@@ -59,6 +62,7 @@ final class ConfigManager
 
                 // 304 Not Modified — cached config is still current
                 if ($status === 304 && $this->cachedConfig !== null) {
+                    $this->lastFetchedAt = microtime(as_float: true);
                     return $this->cachedConfig;
                 }
 
@@ -77,7 +81,8 @@ final class ConfigManager
                     throw new RuntimeException('Config response is not valid JSON');
                 }
 
-                $this->cachedConfig = ProjectConfig::fromArray($data, $etag);
+                $this->cachedConfig  = ProjectConfig::fromArray($data, $etag);
+                $this->lastFetchedAt = microtime(as_float: true);
 
                 return $this->cachedConfig;
             } catch (RuntimeException $e) {
@@ -95,6 +100,19 @@ final class ConfigManager
             0,
             $lastException,
         );
+    }
+
+    /**
+     * Return true when the cached config is older than $maxAgeSeconds.
+     * Always returns false when $maxAgeSeconds is 0 (polling disabled).
+     */
+    public function isStale(int $maxAgeSeconds): bool
+    {
+        if ($maxAgeSeconds <= 0 || $this->lastFetchedAt === 0.0) {
+            return false;
+        }
+
+        return (microtime(as_float: true) - $this->lastFetchedAt) >= $maxAgeSeconds;
     }
 
     /**

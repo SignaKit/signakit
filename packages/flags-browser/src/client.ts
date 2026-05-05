@@ -30,6 +30,7 @@ import { evaluateFlag, evaluateAllFlags } from './evaluator'
 import { isBot } from './ua/bot-patterns'
 import {
   SIGNAKIT_EVENTS_URL,
+  DEFAULT_POLLING_INTERVAL,
   MAX_EVENT_KEY_LENGTH,
   MAX_USER_ID_LENGTH,
   MAX_METADATA_SIZE_BYTES,
@@ -297,6 +298,8 @@ export class SignaKitClient {
   readonly sdkKey: string
   private readyPromise: Promise<OnReadyResult>
   private isReady = false
+  private pollingInterval: number
+  private handleVisibilityChange: () => void
 
   constructor(config: SignaKitClientConfig) {
     if (!config.sdkKey) {
@@ -304,6 +307,7 @@ export class SignaKitClient {
     }
 
     this.sdkKey = config.sdkKey
+    this.pollingInterval = config.pollingInterval ?? DEFAULT_POLLING_INTERVAL
 
     // Parse SDK key to get org ID, project ID, and environment
     const { orgId, projectId, environment } = parseSdkKey(config.sdkKey)
@@ -313,6 +317,16 @@ export class SignaKitClient {
       projectId,
       environment,
     })
+
+    // Pause polling while the tab is hidden; resume when visible again
+    this.handleVisibilityChange = () => {
+      if (typeof document === 'undefined') return
+      if (document.hidden) {
+        this.configManager.stopPolling()
+      } else {
+        this.configManager.startPolling(this.pollingInterval)
+      }
+    }
 
     // Start fetching config immediately
     this.readyPromise = this.initialize()
@@ -325,10 +339,29 @@ export class SignaKitClient {
     try {
       await this.configManager.fetchConfig()
       this.isReady = true
+
+      if (this.pollingInterval > 0) {
+        this.configManager.startPolling(this.pollingInterval)
+        if (typeof document !== 'undefined') {
+          document.addEventListener('visibilitychange', this.handleVisibilityChange)
+        }
+      }
+
       return { success: true }
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'Unknown error'
       return { success: false, reason }
+    }
+  }
+
+  /**
+   * Stop background polling and remove event listeners.
+   * Call this when the client is no longer needed to prevent memory leaks.
+   */
+  destroy(): void {
+    this.configManager.stopPolling()
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange)
     }
   }
 

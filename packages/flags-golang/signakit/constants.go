@@ -1,6 +1,8 @@
 // Package signakit provides the public API for the SignaKit feature-flag SDK.
 package signakit
 
+import "time"
+
 // CDN and events endpoints.
 const (
 	// SignaKitCDNURL is the base URL for the public flag-config CDN.
@@ -8,6 +10,9 @@ const (
 	// SignaKitEventsURL is the events ingestion endpoint.
 	SignaKitEventsURL = "https://60amq9ozsf.execute-api.us-east-2.amazonaws.com/v1/flag-events"
 )
+
+// DefaultPollingInterval is how often the client re-fetches the flag config.
+const DefaultPollingInterval = 30 * time.Second
 
 // Bucketing.
 const (

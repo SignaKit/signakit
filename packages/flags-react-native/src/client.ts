@@ -20,10 +20,11 @@ import type {
   SignaKitEvent,
   AsyncStorageLike,
 } from './types'
+import { AppState, type AppStateStatus } from 'react-native'
 import { ConfigManager, parseSdkKey } from './config-manager'
 import { evaluateFlag, evaluateAllFlags } from './evaluator'
 import { SignaKitUserContext } from './user-context'
-import { SIGNAKIT_EVENTS_URL } from './constants'
+import { SIGNAKIT_EVENTS_URL, DEFAULT_POLLING_INTERVAL } from './constants'
 
 /**
  * Best-effort require of `@react-native-async-storage/async-storage`.
@@ -52,6 +53,8 @@ export class SignaKitClient {
   readonly sdkKey: string
   private readyPromise: Promise<OnReadyResult>
   private isReady = false
+  private pollingInterval: number
+  private appStateSubscription: ReturnType<typeof AppState.addEventListener> | null = null
   /**
    * In-memory exposure dedup map. Keyed by `${flagKey}:${userId}`.
    * Reset on cold start, which is the right semantic for a mobile "session".
@@ -64,6 +67,7 @@ export class SignaKitClient {
     }
 
     this.sdkKey = config.sdkKey
+    this.pollingInterval = config.pollingInterval ?? DEFAULT_POLLING_INTERVAL
 
     const { orgId, projectId, environment } = parseSdkKey(config.sdkKey)
 
@@ -91,6 +95,16 @@ export class SignaKitClient {
     try {
       await this.configManager.fetchConfig()
       this.isReady = true
+
+      if (this.pollingInterval > 0) {
+        this.configManager.startPolling(this.pollingInterval)
+        // Pause polling when backgrounded, resume when foregrounded
+        this.appStateSubscription = AppState.addEventListener(
+          'change',
+          this.handleAppStateChange
+        )
+      }
+
       return { success: true, fromCache: false }
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'Unknown error'
@@ -100,6 +114,24 @@ export class SignaKitClient {
       }
       return { success: false, reason }
     }
+  }
+
+  private handleAppStateChange = (state: AppStateStatus): void => {
+    if (state === 'active') {
+      this.configManager.startPolling(this.pollingInterval)
+    } else {
+      this.configManager.stopPolling()
+    }
+  }
+
+  /**
+   * Stop polling and release the AppState subscription.
+   * Call this when the client is no longer needed (e.g. in tests).
+   */
+  destroy(): void {
+    this.configManager.stopPolling()
+    this.appStateSubscription?.remove()
+    this.appStateSubscription = null
   }
 
   async onReady(): Promise<OnReadyResult> {

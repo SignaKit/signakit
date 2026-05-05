@@ -17,6 +17,13 @@ export interface SignaKitClientConfig {
    * Defaults to `false`.
    */
   persistConfig?: boolean
+  /**
+   * How often (in milliseconds) to re-fetch the flag config from the CDN.
+   * Polling automatically pauses when the app is backgrounded and resumes
+   * when it returns to the foreground.
+   * Set to 0 to disable polling. Default: 30000 (30 seconds).
+   */
+  pollingInterval?: number
 }
 
 // Ready result

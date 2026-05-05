@@ -16,6 +16,12 @@ export interface SignaKitProviderProps {
   children: React.ReactNode
   /** Rendered while the client is initializing. Defaults to null. */
   loadingFallback?: React.ReactNode
+  /**
+   * How often (in milliseconds) to re-fetch the flag config from the CDN.
+   * Polling is paused automatically while the browser tab is hidden.
+   * Set to 0 to disable. Default: 30 000 ms.
+   */
+  pollingInterval?: number
 }
 
 export function SignaKitProvider({
@@ -24,6 +30,7 @@ export function SignaKitProvider({
   attributes,
   children,
   loadingFallback = null,
+  pollingInterval,
 }: SignaKitProviderProps) {
   const [userContext, setUserContext] = useState<SignaKitUserContext | null>(null)
   const [loading, setLoading] = useState(true)
@@ -38,7 +45,7 @@ export function SignaKitProvider({
     clientRef.current = null
 
     async function init() {
-      const client = createInstance({ sdkKey })
+      const client = createInstance({ sdkKey, pollingInterval })
       if (!client) {
         console.error('[SignaKit] Failed to create client')
         if (!cancelled) {
@@ -72,6 +79,8 @@ export function SignaKitProvider({
 
     return () => {
       cancelled = true
+      clientRef.current?.destroy()
+      clientRef.current = null
     }
     // sdkKey intentionally triggers a full re-init; userId/attributes handled separately
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -3,6 +3,7 @@
 /// Mirrors `packages/flags-node/src/config-manager.ts`.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -82,6 +83,7 @@ class ConfigManager {
 
   ProjectConfig? _config;
   String? _etag;
+  Timer? _pollingTimer;
 
   String _getConfigUrl() {
     final base = kSignaKitCdnUrl.replaceAll(RegExp(r'/$'), '');
@@ -127,8 +129,28 @@ class ConfigManager {
   /// Currently cached config, or `null` if not yet fetched.
   ProjectConfig? getConfig() => _config;
 
-  /// Closes the underlying HTTP client.
+  /// Start polling for config updates on [interval].
+  /// Safe to call multiple times — only one timer runs at a time.
+  void startPolling(Duration interval) {
+    if (_pollingTimer != null) return;
+    _pollingTimer = Timer.periodic(interval, (_) async {
+      try {
+        await fetchConfig();
+      } catch (_) {
+        // Polling errors are silent — stale config is better than a crash
+      }
+    });
+  }
+
+  /// Cancel the polling timer.
+  void stopPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
+  }
+
+  /// Closes the polling timer and the underlying HTTP client.
   void close() {
+    stopPolling();
     _httpClient.close();
   }
 }

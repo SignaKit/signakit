@@ -1,4 +1,6 @@
 /// SignaKit SDK constants. Mirrors `packages/flags-node/src/constants.ts`.
+
+const Duration kDefaultPollingInterval = Duration(seconds: 30);
 const String kSignaKitCdnUrl = 'https://d30l2rkped5b4m.cloudfront.net';
 
 const String kSignaKitEventsUrl =

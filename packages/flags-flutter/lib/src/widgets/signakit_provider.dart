@@ -94,6 +94,9 @@ class _SignaKitController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void pausePolling() => _client?.pausePolling();
+  void resumePolling() => _client?.resumePolling();
+
   @override
   void dispose() {
     _disposed = true;
@@ -165,6 +168,7 @@ class SignaKitProvider extends StatefulWidget {
 
 class _SignaKitProviderState extends State<SignaKitProvider> {
   late _SignaKitController _controller;
+  AppLifecycleListener? _lifecycleListener;
 
   @override
   void initState() {
@@ -173,6 +177,11 @@ class _SignaKitProviderState extends State<SignaKitProvider> {
       sdkKey: widget.sdkKey,
       userId: widget.userId,
       attributes: widget.attributes,
+    );
+    _lifecycleListener = AppLifecycleListener(
+      onResume: _controller.resumePolling,
+      onPause: _controller.pausePolling,
+      onHide: _controller.pausePolling,
     );
   }
 
@@ -200,6 +209,7 @@ class _SignaKitProviderState extends State<SignaKitProvider> {
 
   @override
   void dispose() {
+    _lifecycleListener?.dispose();
     _controller.dispose();
     super.dispose();
   }

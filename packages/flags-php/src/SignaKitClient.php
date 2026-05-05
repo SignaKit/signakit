@@ -28,9 +28,19 @@ final class SignaKitClient
     private readonly ConfigManager $configManager;
     private bool $initialized = false;
 
+    /**
+     * @param string                  $sdkKey          SDK key (sk_{env}_{orgId}_{projectId}_{random})
+     * @param HttpClientInterface|null $httpClient      Optional HTTP client override
+     * @param int                     $refreshInterval Seconds between config re-fetches for long-running
+     *                                                 processes (Swoole, RoadRunner, queue workers).
+     *                                                 Set to 0 to disable. Default: 30 seconds.
+     *                                                 In PHP-FPM this is a no-op — config is always
+     *                                                 fetched fresh on each process start.
+     */
     public function __construct(
         private readonly string $sdkKey,
         ?HttpClientInterface $httpClient = null,
+        private readonly int $refreshInterval = 30,
     ) {
         $this->httpClient    = $httpClient ?? self::resolveDefaultHttpClient();
         $this->configManager = new ConfigManager($this->sdkKey, $this->httpClient);
@@ -63,6 +73,11 @@ final class SignaKitClient
     /**
      * Create a user evaluation context.
      *
+     * For long-running processes (Swoole, RoadRunner, queue workers) this method
+     * transparently re-fetches the config when it is older than $refreshInterval.
+     * In PHP-FPM this check is always a no-op because each request starts a fresh
+     * process with no cached config.
+     *
      * @param array<string, mixed> $attributes  Key-value user attributes for audience matching
      * @throws RuntimeException when called before initialize()
      */
@@ -74,6 +89,16 @@ final class SignaKitClient
             throw new RuntimeException(
                 'SignaKit client must be initialized before creating user contexts. Call initialize() first.'
             );
+        }
+
+        // Auto-refresh stale config in long-running processes — silent on error
+        // so a temporary CDN blip never blocks flag evaluation.
+        if ($this->configManager->isStale($this->refreshInterval)) {
+            try {
+                $this->configManager->fetchConfig();
+            } catch (RuntimeException) {
+                // Keep serving stale config rather than breaking the app
+            }
         }
 
         return new SignaKitUserContext(
