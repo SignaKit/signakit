@@ -47,7 +47,7 @@ jobs:
     environment: publish
     permissions:
       id-token: write
-      contents: read
+      contents: write
     defaults:
       run:
         working-directory: packages/flags-node
@@ -61,15 +61,13 @@ jobs:
           cache-dependency-path: packages/flags-node/package-lock.json
       - run: npm ci
       - name: Publish if version is new
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
             echo "Version $VERSION already published — skipping."
           else
-            npm publish --provenance --access public
+            NODE_AUTH_TOKEN="" npm publish --provenance --access public
           fi
 
   publish-flags-browser:
@@ -80,7 +78,7 @@ jobs:
     environment: publish
     permissions:
       id-token: write
-      contents: read
+      contents: write
     defaults:
       run:
         working-directory: packages/flags-browser
@@ -94,15 +92,13 @@ jobs:
           cache-dependency-path: packages/flags-browser/package-lock.json
       - run: npm ci
       - name: Publish if version is new
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
             echo "Version $VERSION already published — skipping."
           else
-            npm publish --provenance --access public
+            NODE_AUTH_TOKEN="" npm publish --provenance --access public
           fi
 
   # flags-react has flags-browser as a peer dep — wait for it if it ran.
@@ -117,7 +113,7 @@ jobs:
     environment: publish
     permissions:
       id-token: write
-      contents: read
+      contents: write
     defaults:
       run:
         working-directory: packages/flags-react
@@ -131,15 +127,13 @@ jobs:
           cache-dependency-path: packages/flags-react/package-lock.json
       - run: npm ci
       - name: Publish if version is new
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
             echo "Version $VERSION already published — skipping."
           else
-            npm publish --provenance --access public
+            NODE_AUTH_TOKEN="" npm publish --provenance --access public
           fi
 
   publish-flags-react-native:
@@ -150,7 +144,7 @@ jobs:
     environment: publish
     permissions:
       id-token: write
-      contents: read
+      contents: write
     defaults:
       run:
         working-directory: packages/flags-react-native
@@ -164,13 +158,11 @@ jobs:
           cache-dependency-path: packages/flags-react-native/package-lock.json
       - run: npm ci
       - name: Publish if version is new
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
             echo "Version $VERSION already published — skipping."
           else
-            npm publish --provenance --access public
+            NODE_AUTH_TOKEN="" npm publish --provenance --access public
           fi
