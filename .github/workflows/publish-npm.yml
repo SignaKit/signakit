@@ -61,6 +61,8 @@ jobs:
           cache-dependency-path: packages/flags-node/package-lock.json
       - run: npm ci
       - name: Publish if version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
@@ -92,6 +94,8 @@ jobs:
           cache-dependency-path: packages/flags-browser/package-lock.json
       - run: npm ci
       - name: Publish if version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
@@ -127,6 +131,8 @@ jobs:
           cache-dependency-path: packages/flags-react/package-lock.json
       - run: npm ci
       - name: Publish if version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
@@ -158,6 +164,8 @@ jobs:
           cache-dependency-path: packages/flags-react-native/package-lock.json
       - run: npm ci
       - name: Publish if version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
