@@ -44,13 +44,28 @@ Create the client once so it is shared across all requests in the same process. 
 
 ```ts title="lib/signakit.ts"
 import { createInstance } from '@signakit/flags-node'
+import type { SignaKitClient } from '@signakit/flags-node'
 
-const client = createInstance({
-  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
-})
+const globalForSignaKit = globalThis as unknown as {
+  signakit: SignaKitClient
+  signakitReady: Promise<{ success: boolean; reason?: string }>
+}
 
-export const signakit = client
-export const signakitReady = client.onReady()
+if (!globalForSignaKit.signakit) {
+  const client = createInstance({
+    sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  })
+
+  if (!client) {
+    throw new Error('[SignaKit] Failed to create client — check your SIGNAKIT_SDK_KEY')
+  }
+
+  globalForSignaKit.signakit = client
+  globalForSignaKit.signakitReady = client.onReady()
+}
+
+export const signakit = globalForSignaKit.signakit
+export const signakitReady = globalForSignaKit.signakitReady
 ```
 
 </Step>

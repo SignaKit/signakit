@@ -16,6 +16,13 @@ export interface SignaKitClientConfig {
    * Set to 0 to disable polling. Default: 30000 (30 seconds).
    */
   pollingInterval?: number
+  /**
+   * Optional scheduler for fire-and-forget event sends (e.g. exposure tracking).
+   * Pass `after` from `next/server` via `@signakit/flags-node/next` so events
+   * are sent after the response is flushed, preventing them from being aborted
+   * by the request lifecycle.
+   */
+  scheduler?: (callback: () => void | Promise<void>) => void
 }
 
 // Ready result

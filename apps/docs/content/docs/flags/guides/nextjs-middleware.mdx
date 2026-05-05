@@ -53,16 +53,35 @@ Proxy is re-evaluated on every matched request. Create the SignaKit client once 
 
 ```ts title="lib/signakit.ts"
 import { createInstance } from '@signakit/flags-node'
+import type { SignaKitClient } from '@signakit/flags-node'
 
-const client = createInstance({
-  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
-})
+const globalForSignaKit = globalThis as unknown as {
+  signakit: SignaKitClient
+  signakitReady: Promise<{ success: boolean; reason?: string }>
+}
 
-export const signakit = client
-export const signakitReady = client.onReady()
+if (!globalForSignaKit.signakit) {
+  const client = createInstance({
+    sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  })
+
+  if (!client) {
+    throw new Error('[SignaKit] Failed to create client — check your SIGNAKIT_SDK_KEY')
+  }
+
+  globalForSignaKit.signakit = client
+  globalForSignaKit.signakitReady = client.onReady()
+}
+
+export const signakit = globalForSignaKit.signakit
+export const signakitReady = globalForSignaKit.signakitReady
 ```
 
 The `signakitReady` promise is kicked off immediately when the module loads. By the time the first request hits proxy, the config is already resolved.
+
+<Callout type="info" title="Using both App Router and proxy.ts?">
+If your project also uses the App Router with `@signakit/flags-node/next`, use the same `lib/signakit.ts` file from the [App Router guide](/flags/guides/nextjs-app-router) rather than creating a separate one here. The `/next` import is safe to use in `proxy.ts` — middleware typically uses `targeted` rules (feature flags, not A/B tests), and targeted rules skip exposure tracking entirely so `after()` is never called.
+</Callout>
 
 </Step>
 
