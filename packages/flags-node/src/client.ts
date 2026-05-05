@@ -114,10 +114,17 @@ export class SignaKitUserContext {
       event.attributes = sanitizedAttrs
     }
 
-    // Fire-and-forget: don't await, just catch errors
-    this.client._sendEvent(event).catch(() => {
-      // Silently ignore - exposure tracking should not break the app
-    })
+    const send = () => this.client._sendEvent(event).catch(() => {})
+    if (this.client._scheduler) {
+      try {
+        this.client._scheduler(send)
+      } catch {
+        // after() throws in Edge Runtime (middleware) — fall back to fire-and-forget
+        send()
+      }
+    } else {
+      send()
+    }
   }
 
   /**
@@ -276,6 +283,7 @@ export class SignaKitClient {
   private readyPromise: Promise<OnReadyResult>
   private isReady = false
   private pollingInterval: number
+  _scheduler: ((callback: () => void | Promise<void>) => void) | undefined
 
   constructor(config: SignaKitClientConfig) {
     if (!config.sdkKey) {
@@ -284,6 +292,7 @@ export class SignaKitClient {
 
     this.sdkKey = config.sdkKey
     this.pollingInterval = config.pollingInterval ?? DEFAULT_POLLING_INTERVAL
+    this._scheduler = config.scheduler
 
     // Parse SDK key to get org ID, project ID, and environment
     const { orgId, projectId, environment } = parseSdkKey(config.sdkKey)
@@ -440,6 +449,9 @@ export class SignaKitClient {
         console.error(`[SignaKit] Failed to send event: ${response.status} ${response.statusText}`)
       }
     } catch (error) {
+      // AbortError is expected in dev (Turbopack request cleanup) and when
+      // fire-and-forget exposure sends outlive the request context.
+      if (error instanceof Error && error.name === 'AbortError') return
       console.error('[SignaKit] Failed to send event:', error)
     }
   }

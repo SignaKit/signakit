@@ -39,27 +39,56 @@ SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
 
 ### Create a module-level singleton
 
-Create the client once so it is shared across all requests in the same process. In Next.js this file is evaluated once per server cold start.
+Use the `/next` subpath so exposure events are scheduled with Next.js's `after()` — sent after the response is flushed rather than aborted by the request lifecycle. The `globalThis` guard prevents Turbopack from discarding the pre-warmed client when it re-evaluates the module on requests.
 
 ```ts title="lib/signakit.ts"
-import { createInstance } from '@signakit/flags-node'
+import { createInstance } from '@signakit/flags-node/next'
+import type { SignaKitClient } from '@signakit/flags-node'
 
-const client = createInstance({
-  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
-})
-
-if (!client) {
-  throw new Error('[SignaKit] Failed to create client — check your SIGNAKIT_SDK_KEY')
+const globalForSignaKit = globalThis as unknown as {
+  signakit: SignaKitClient
+  signakitReady: Promise<{ success: boolean; reason?: string }>
 }
 
-// Kick off config fetch immediately — resolves before the first request arrives
-export const signakit = client
-export const signakitReady = client.onReady()
+if (!globalForSignaKit.signakit) {
+  const client = createInstance({
+    sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  })
+
+  if (!client) {
+    throw new Error('[SignaKit] Failed to create client — check your SIGNAKIT_SDK_KEY')
+  }
+
+  globalForSignaKit.signakit = client
+  globalForSignaKit.signakitReady = client.onReady()
+}
+
+export const signakit = globalForSignaKit.signakit
+export const signakitReady = globalForSignaKit.signakitReady
 ```
 
 <Callout type="danger" title="Do not add 'use server' to this file">
 `'use server'` marks every export as a server action — which must be an `async function`. Exporting a class instance (`signakit`) or a `Promise` (`signakitReady`) from a `'use server'` file is invalid and Next.js will throw an error. This file should have no directive at all. Server components import from it freely since they are already server-side.
 </Callout>
+
+</Step>
+
+<Step>
+
+### Pre-warm the client with instrumentation
+
+Next.js's `after()` handles exposure events post-response, but the config fetch itself must also complete outside any request's async context — otherwise Turbopack's dev server can abort it during cold start. `instrumentation.ts` runs once before any requests arrive, making it the right place to warm the client.
+
+```ts title="instrumentation.ts"
+export async function register() {
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const { signakitReady } = await import('./lib/signakit')
+    await signakitReady
+  }
+}
+```
+
+Place `instrumentation.ts` at the project root (same level as `package.json`). The `NEXT_RUNTIME === 'nodejs'` guard ensures it only runs in the Node.js runtime, not the Edge runtime used by `proxy.ts`.
 
 </Step>
 
@@ -211,10 +240,11 @@ Use middleware to rewrite or redirect based on a flag before the page renders.
 ```ts title="proxy.ts"
 // Next.js 16 uses proxy.ts instead of middleware.ts
 import { NextResponse } from 'next/server'
-import { signakit } from '@/lib/signakit'
+import { signakit, signakitReady } from '@/lib/signakit'
 import type { NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
+  await signakitReady
   const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
   const userCtx = signakit.createUserContext(visitorId)
   const homepage = userCtx?.decide('homepage-redesign')
@@ -247,9 +277,12 @@ Next.js 16 uses `proxy.ts` at the project root instead of `middleware.ts`. The A
 |---|---|---|
 | `'use server'` at the top of `lib/signakit.ts` | Marks every export as a server action — class instances and Promises are not valid server action exports; Next.js throws at startup | Remove the directive entirely; server components are already server-side |
 | `createInstance()` inside `page.tsx` | Re-fetches config on every request; loses per-instance dedup | Create the client once in `lib/signakit.ts` |
+| No `globalThis` guard in `lib/signakit.ts` | Turbopack re-evaluates modules on requests, creating a fresh uninitialized client each time | Wrap `createInstance` in the `globalThis` guard shown in the setup step |
+| No `instrumentation.ts` | Config fetch runs inside the first request's async context and can be aborted before it completes | Add `instrumentation.ts` to pre-warm the client before any requests arrive |
+| Importing from `@signakit/flags-node` instead of `@signakit/flags-node/next` | Exposure events are fire-and-forget within the request and aborted when the response is sent | Use `@signakit/flags-node/next` — it wraps sends with `after()` automatically |
 | `decide()` inside a `'use client'` component | Requires bundling the server SDK client-side | Evaluate in the server component, pass result as prop |
 | `decideAll()` in `proxy.ts` | Evaluates every flag on every request | Use `decide('specific-flag')` with a narrow `matcher` |
-| Not awaiting `signakitReady` | `decide()` returns `null` if config hasn't loaded yet | `await signakitReady` at the top of every evaluating server component |
+| Not awaiting `signakitReady` | `decide()` returns `null` if config hasn't loaded yet | `await signakitReady` at the top of every evaluating server component and middleware function |
 | Not using optional chaining on `createUserContext()` | Returns `null` if the client isn't ready — calling `.decide()` directly throws | Use `userCtx?.decide(...)` or check for null |
 
 ---

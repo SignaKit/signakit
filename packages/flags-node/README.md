@@ -53,20 +53,54 @@ await userCtx?.trackEvent('purchase_completed', { value: 99.99 })
 
 ## Next.js App Router
 
-Evaluate flags in server components and pass results as props to client components.
+Use the `/next` subpath export for App Router projects. It re-exports the full SDK and automatically wraps exposure event sends with Next.js's `after()`, so they are sent after the response is flushed rather than being aborted by the request lifecycle.
+
+### 1. Create the singleton (`lib/signakit.ts`)
 
 ```typescript
-// lib/signakit.ts
-import { createInstance } from '@signakit/flags-node'
+import { createInstance } from '@signakit/flags-node/next'
+import type { SignaKitClient } from '@signakit/flags-node'
 
-const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+const globalForSignaKit = globalThis as unknown as {
+  signakit: SignaKitClient
+  signakitReady: Promise<{ success: boolean; reason?: string }>
+}
 
-export const signakit = client
-export const signakitReady = client?.onReady()
+if (!globalForSignaKit.signakit) {
+  const client = createInstance({
+    sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  })
+
+  if (!client) {
+    throw new Error('[SignaKit] Failed to create client — check your SIGNAKIT_SDK_KEY')
+  }
+
+  globalForSignaKit.signakit = client
+  globalForSignaKit.signakitReady = client.onReady()
+}
+
+export const signakit = globalForSignaKit.signakit
+export const signakitReady = globalForSignaKit.signakitReady
 ```
 
+The `globalThis` guard prevents Turbopack from discarding the pre-warmed client when it re-evaluates the module on requests.
+
+### 2. Pre-warm with `instrumentation.ts` (project root)
+
 ```typescript
-// app/checkout/page.tsx
+export async function register() {
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    const { signakitReady } = await import('./lib/signakit')
+    await signakitReady
+  }
+}
+```
+
+`register()` runs once before any requests arrive. Awaiting `signakitReady` here ensures the config fetch completes outside any request's async context, preventing it from being aborted.
+
+### 3. Evaluate a flag in a server component
+
+```typescript
 import { signakit, signakitReady } from '@/lib/signakit'
 import { cookies } from 'next/headers'
 
@@ -76,7 +110,7 @@ export default async function CheckoutPage() {
   const cookieStore = await cookies()
   const visitorId = cookieStore.get('visitor_id')?.value ?? 'anonymous'
 
-  const userCtx = signakit?.createUserContext(visitorId)
+  const userCtx = signakit.createUserContext(visitorId)
   const checkout = userCtx?.decide('checkout-redesign')
 
   return checkout?.variationKey === 'treatment' ? <CheckoutV2 /> : <LegacyCheckout />
@@ -123,6 +157,7 @@ const client = createInstance({
 |---|---|---|---|
 | `sdkKey` | `string` | required | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
 | `pollingInterval` | `number` | `30000` | How often (ms) to re-fetch config. Uses ETags — a no-op poll is a lightweight conditional GET. Set to `0` to disable polling. |
+| `scheduler` | `(cb: () => void \| Promise<void>) => void` | `undefined` | Optional scheduler for fire-and-forget exposure events. Pass `after` from `next/server` (via `@signakit/flags-node/next`) to send events after the response is flushed. |
 
 **Returns:** `SignaKitClient | null` — `null` if the SDK key is missing or malformed.
 

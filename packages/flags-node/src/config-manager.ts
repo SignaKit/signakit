@@ -54,7 +54,7 @@ export class ConfigManager {
       headers['If-None-Match'] = this.etag
     }
 
-    const response = await fetch(url, { headers })
+    const response = await fetch(url, { headers, cache: 'no-store' })
 
     // 304 Not Modified - return cached config
     if (response.status === 304 && this.config) {
