@@ -59,6 +59,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: packages/flags-node/package-lock.json
+      - run: npm install -g npm@latest
       - run: npm ci
       - name: Publish if version is new
         run: |
@@ -90,6 +91,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: packages/flags-browser/package-lock.json
+      - run: npm install -g npm@latest
       - run: npm ci
       - name: Publish if version is new
         run: |
@@ -125,6 +127,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: packages/flags-react/package-lock.json
+      - run: npm install -g npm@latest
       - run: npm ci
       - name: Publish if version is new
         run: |
@@ -156,6 +159,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: packages/flags-react-native/package-lock.json
+      - run: npm install -g npm@latest
       - run: npm ci
       - name: Publish if version is new
         run: |
