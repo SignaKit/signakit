@@ -8,6 +8,8 @@ SIGNAKIT_EVENTS_URL: str = (
 )
 
 #: Bucket space for hashing — 0–9999 gives 0.01% granularity.
+DEFAULT_POLLING_INTERVAL: float = 30.0  # seconds
+
 BUCKET_SPACE: int = 10000
 
 # Event validation limits — kept in sync with packages/flags-node/src/constants.ts

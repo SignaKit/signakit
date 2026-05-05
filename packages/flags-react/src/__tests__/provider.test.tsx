@@ -36,6 +36,7 @@ function makeMockClient(opts?: { readySuccess?: boolean; readyReason?: string })
       reason: opts?.readyReason,
     }),
     createUserContext: vi.fn().mockReturnValue(mockCtx),
+    destroy: vi.fn(),
   }
   return { client, mockCtx }
 }
@@ -87,7 +88,7 @@ describe('SignaKitProvider', () => {
     )
 
     await waitFor(() => screen.getByText('Content'))
-    expect(mockCreateInstance).toHaveBeenCalledWith({ sdkKey: VALID_SDK_KEY })
+    expect(mockCreateInstance).toHaveBeenCalledWith({ sdkKey: VALID_SDK_KEY, pollingInterval: undefined })
   })
 
   it('renders children (fail open) when createInstance returns null', async () => {

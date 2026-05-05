@@ -15,17 +15,22 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Top-level SDK entry point. Mirrors the public surface of
  * {@code packages/flags-node/src/client.ts}.
  */
-public class SignaKitClient {
+public class SignaKitClient implements AutoCloseable {
 
     private final String sdkKey;
     private final ConfigManager configManager;
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
+    private final Duration pollingInterval;
+    private final ScheduledExecutorService scheduler;
     private volatile boolean ready;
 
     public SignaKitClient(SignaKitClientConfig config) {
@@ -38,34 +43,74 @@ public class SignaKitClient {
                 ? config.httpClient()
                 : HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         this.mapper = new ObjectMapper();
+        this.pollingInterval = config.pollingInterval() != null
+                ? config.pollingInterval()
+                : Duration.ofSeconds(Constants.DEFAULT_POLLING_INTERVAL_SECONDS);
 
         ConfigManager.ParsedSdkKey parsed = ConfigManager.parseSdkKey(sdkKey);
         this.configManager = new ConfigManager(
                 parsed.orgId(), parsed.projectId(), parsed.environment(), this.httpClient, this.mapper);
+
+        // Daemon thread: never prevents JVM shutdown
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "signakit-polling");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
-    /** Test/internal seam: build a client wired to a pre-built ConfigManager. */
+    /** Test/internal seam: build a client wired to a pre-built ConfigManager. Polling disabled. */
     SignaKitClient(String sdkKey, ConfigManager configManager, HttpClient httpClient) {
         this.sdkKey = sdkKey;
         this.configManager = configManager;
         this.httpClient = httpClient;
         this.mapper = new ObjectMapper();
+        this.pollingInterval = Duration.ZERO;
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "signakit-polling");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
-     * Synchronously fetch the config. Returns {@code true} on success, {@code false}
-     * if the fetch fails — the caller can inspect logs and decide.
+     * Synchronously fetch the config and start background polling.
+     * Returns {@code true} on success, {@code false} if the fetch fails.
      */
     public boolean onReady() {
         try {
             configManager.fetchConfig();
             ready = true;
+            startPolling();
             return true;
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             System.err.println("[SignaKit] onReady failed: " + e.getMessage());
             return false;
         }
+    }
+
+    private void startPolling() {
+        if (pollingInterval.isZero() || pollingInterval.isNegative()) return;
+        long intervalMs = pollingInterval.toMillis();
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                configManager.fetchConfig();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                // Polling errors are silent — stale config is better than a crash
+            }
+        }, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Stop the background polling thread.
+     * Implements {@link AutoCloseable} so clients can be used in try-with-resources.
+     */
+    @Override
+    public void close() {
+        scheduler.shutdownNow();
     }
 
     public CompletableFuture<Boolean> onReadyAsync() {

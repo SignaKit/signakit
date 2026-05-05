@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -192,6 +193,8 @@ class ConfigManager:
         self._etag: str | None = None
         self._async_client = async_client
         self._sync_client = sync_client
+        self._polling_stop = threading.Event()
+        self._polling_thread: threading.Thread | None = None
 
     @property
     def config_url(self) -> str:
@@ -240,6 +243,41 @@ class ConfigManager:
                     self.config_url, headers=self._request_headers()
                 )
         return self._ingest_response(response)
+
+    def start_polling(self, interval: float) -> None:
+        """Start a daemon thread that re-fetches config every *interval* seconds.
+
+        Uses ``threading.Event.wait`` so ``stop_polling`` wakes the thread
+        immediately rather than waiting for the next tick.
+        Safe to call multiple times — only one thread runs at a time.
+
+        Args:
+            interval: Poll interval in seconds.
+        """
+        if self._polling_thread is not None:
+            return
+        self._polling_stop.clear()
+
+        def _poll() -> None:
+            while not self._polling_stop.wait(timeout=interval):
+                try:
+                    self.fetch_config_sync()
+                except Exception:  # noqa: BLE001
+                    pass  # stale config is better than a crash
+
+        thread = threading.Thread(
+            target=_poll, daemon=True, name="signakit-polling"
+        )
+        self._polling_thread = thread
+        thread.start()
+
+    def stop_polling(self) -> None:
+        """Cancel the polling thread and wait for it to exit."""
+        self._polling_stop.set()
+        thread = self._polling_thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+            self._polling_thread = None
 
     def fetch_config_sync(self) -> ProjectConfig:
         """Sync: fetch the config from CloudFront with ETag-based caching."""

@@ -1,6 +1,6 @@
 name: signakit_flags
 description: Official Flutter SDK for SignaKit Feature Flags. Fetches flag configurations from CloudFront/S3 and evaluates flags locally with deterministic bucketing.
-version: 1.0.0
+version: 1.1.0
 homepage: https://signakit.com
 repository: https://github.com/SignaKit/signakit
 issue_tracker: https://github.com/SignaKit/signakit/issues

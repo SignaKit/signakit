@@ -17,11 +17,12 @@ import (
 type ClientOption func(*clientConfig)
 
 type clientConfig struct {
-	httpClient    *http.Client
-	logger        *slog.Logger
-	cdnBaseURL    string
-	eventsURL     string
-	asyncDispatch bool
+	httpClient      *http.Client
+	logger          *slog.Logger
+	cdnBaseURL      string
+	eventsURL       string
+	asyncDispatch   bool
+	pollingInterval time.Duration
 }
 
 // WithHTTPClient overrides the *http.Client used for both config fetches and
@@ -51,14 +52,22 @@ func WithSyncEventDispatch() ClientOption {
 	return func(cc *clientConfig) { cc.asyncDispatch = false }
 }
 
+// WithPollingInterval sets how often the client re-fetches the flag config.
+// Uses ETags so a no-op poll is a cheap conditional GET.
+// Set to 0 to disable background polling. Default: 30s.
+func WithPollingInterval(d time.Duration) ClientOption {
+	return func(cc *clientConfig) { cc.pollingInterval = d }
+}
+
 // Client is a SignaKit feature-flag client. It is safe for concurrent use.
 type Client struct {
-	sdkKey        string
-	configMgr     *configmgr.Manager
-	httpClient    *http.Client
-	logger        *slog.Logger
-	eventsURL     string
-	asyncDispatch bool
+	sdkKey          string
+	configMgr       *configmgr.Manager
+	httpClient      *http.Client
+	logger          *slog.Logger
+	eventsURL       string
+	asyncDispatch   bool
+	pollingCancel   context.CancelFunc
 }
 
 // NewClient constructs a Client and synchronously fetches the initial config.
@@ -69,11 +78,12 @@ func NewClient(ctx context.Context, sdkKey string, opts ...ClientOption) (*Clien
 	}
 
 	cc := &clientConfig{
-		httpClient:    &http.Client{Timeout: 10 * time.Second},
-		logger:        slog.Default(),
-		cdnBaseURL:    SignaKitCDNURL,
-		eventsURL:     SignaKitEventsURL,
-		asyncDispatch: true,
+		httpClient:      &http.Client{Timeout: 10 * time.Second},
+		logger:          slog.Default(),
+		cdnBaseURL:      SignaKitCDNURL,
+		eventsURL:       SignaKitEventsURL,
+		asyncDispatch:   true,
+		pollingInterval: DefaultPollingInterval,
 	}
 	for _, opt := range opts {
 		opt(cc)
@@ -96,14 +106,46 @@ func NewClient(ctx context.Context, sdkKey string, opts ...ClientOption) (*Clien
 		return nil, err
 	}
 
-	return &Client{
+	c := &Client{
 		sdkKey:        sdkKey,
 		configMgr:     mgr,
 		httpClient:    cc.httpClient,
 		logger:        cc.logger,
 		eventsURL:     cc.eventsURL,
 		asyncDispatch: cc.asyncDispatch,
-	}, nil
+	}
+
+	if cc.pollingInterval > 0 {
+		pollCtx, cancel := context.WithCancel(context.Background())
+		c.pollingCancel = cancel
+		go c.pollLoop(pollCtx, cc.pollingInterval)
+	}
+
+	return c, nil
+}
+
+// pollLoop re-fetches the config on each tick until ctx is cancelled.
+func (c *Client) pollLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := c.configMgr.Fetch(ctx); err != nil && ctx.Err() == nil {
+				c.logger.Warn("signakit: config poll failed", "err", err)
+			}
+		}
+	}
+}
+
+// Close stops the background polling goroutine.
+// Call this when the client is no longer needed (e.g. in tests or CLIs).
+func (c *Client) Close() {
+	if c.pollingCancel != nil {
+		c.pollingCancel()
+	}
 }
 
 // Refresh re-fetches the project config (using ETag/304 if applicable).
