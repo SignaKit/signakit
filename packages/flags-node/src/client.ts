@@ -24,6 +24,7 @@ import { evaluateFlag, evaluateAllFlags } from './evaluator'
 import { isBot } from './ua/bot-patterns'
 import {
   SIGNAKIT_EVENTS_URL,
+  DEFAULT_POLLING_INTERVAL,
   MAX_EVENT_KEY_LENGTH,
   MAX_USER_ID_LENGTH,
   MAX_METADATA_SIZE_BYTES,
@@ -274,6 +275,7 @@ export class SignaKitClient {
   private sdkKey: string
   private readyPromise: Promise<OnReadyResult>
   private isReady = false
+  private pollingInterval: number
 
   constructor(config: SignaKitClientConfig) {
     if (!config.sdkKey) {
@@ -281,6 +283,7 @@ export class SignaKitClient {
     }
 
     this.sdkKey = config.sdkKey
+    this.pollingInterval = config.pollingInterval ?? DEFAULT_POLLING_INTERVAL
 
     // Parse SDK key to get org ID, project ID, and environment
     const { orgId, projectId, environment } = parseSdkKey(config.sdkKey)
@@ -296,17 +299,28 @@ export class SignaKitClient {
   }
 
   /**
-   * Initialize the client by fetching the config.
+   * Initialize the client by fetching the config, then start the polling loop.
    */
   private async initialize(): Promise<OnReadyResult> {
     try {
       await this.configManager.fetchConfig()
       this.isReady = true
+      if (this.pollingInterval > 0) {
+        this.configManager.startPolling(this.pollingInterval)
+      }
       return { success: true }
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'Unknown error'
       return { success: false, reason }
     }
+  }
+
+  /**
+   * Stop the background polling loop and release resources.
+   * Call this when the client is no longer needed (e.g. in tests).
+   */
+  destroy(): void {
+    this.configManager.stopPolling()
   }
 
   /**

@@ -10,6 +10,12 @@ export interface SignaKitClientConfig {
    * Format: sk_{env}_{orgId}_{projectId}_{random}
    */
   sdkKey: string
+  /**
+   * How often (in milliseconds) to re-fetch the flag config from the CDN.
+   * Uses ETags so a no-op poll is just a lightweight conditional GET.
+   * Set to 0 to disable polling. Default: 30000 (30 seconds).
+   */
+  pollingInterval?: number
 }
 
 // Ready result

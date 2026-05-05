@@ -42,18 +42,24 @@ SIGNAKIT_SDK_KEY=sk_dev_yourOrgId_yourProjectId_random
 Create the client once so it is shared across all requests in the same process. In Next.js this file is evaluated once per server cold start.
 
 ```ts title="lib/signakit.ts"
-'use server'
-
 import { createInstance } from '@signakit/flags-node'
 
 const client = createInstance({
   sdkKey: process.env.SIGNAKIT_SDK_KEY!,
 })
 
+if (!client) {
+  throw new Error('[SignaKit] Failed to create client — check your SIGNAKIT_SDK_KEY')
+}
+
 // Kick off config fetch immediately — resolves before the first request arrives
 export const signakit = client
 export const signakitReady = client.onReady()
 ```
+
+<Callout type="danger" title="Do not add 'use server' to this file">
+`'use server'` marks every export as a server action — which must be an `async function`. Exporting a class instance (`signakit`) or a `Promise` (`signakitReady`) from a `'use server'` file is invalid and Next.js will throw an error. This file should have no directive at all. Server components import from it freely since they are already server-side.
+</Callout>
 
 </Step>
 
@@ -94,7 +100,7 @@ export default async function CheckoutPage() {
 
   const visitorId = await getVisitorId()
   const userCtx = signakit.createUserContext(visitorId)
-  const checkout = userCtx.decide('checkout-redesign')
+  const checkout = userCtx?.decide('checkout-redesign')
 
   return checkout?.variationKey === 'treatment'
     ? <CheckoutV2 />
@@ -110,6 +116,8 @@ const session = await auth()
 const userCtx = signakit.createUserContext(session?.user.id ?? visitorId, {
   plan: session?.user.plan ?? 'free',
 })
+// userCtx is SignaKitUserContext | null — use optional chaining
+const decision = userCtx?.decide('my-flag')
 ```
 </Callout>
 
@@ -128,7 +136,7 @@ export default async function DashboardPage() {
   await signakitReady
   const visitorId = await getVisitorId()
   const userCtx = signakit.createUserContext(visitorId)
-  const newNav = userCtx.decide('redesigned-nav')
+  const newNav = userCtx?.decide('redesigned-nav')
 
   return (
     <main>
@@ -176,7 +184,7 @@ import { getVisitorId } from '@/lib/visitor'
 export async function trackPurchase(amount: number) {
   const visitorId = await getVisitorId()
   const userCtx = signakit.createUserContext(visitorId)
-  await userCtx.trackEvent('purchase_completed', { value: amount })
+  await userCtx?.trackEvent('purchase_completed', { value: amount })
 }
 ```
 
@@ -209,7 +217,7 @@ import type { NextRequest } from 'next/server'
 export async function middleware(request: NextRequest) {
   const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
   const userCtx = signakit.createUserContext(visitorId)
-  const homepage = userCtx.decide('homepage-redesign')
+  const homepage = userCtx?.decide('homepage-redesign')
 
   if (request.nextUrl.pathname === '/' && homepage?.variationKey === 'treatment') {
     return NextResponse.rewrite(new URL('/homepage-v2', request.url))
@@ -237,10 +245,12 @@ Next.js 16 uses `proxy.ts` at the project root instead of `middleware.ts`. The A
 
 | Pattern | Problem | Fix |
 |---|---|---|
+| `'use server'` at the top of `lib/signakit.ts` | Marks every export as a server action — class instances and Promises are not valid server action exports; Next.js throws at startup | Remove the directive entirely; server components are already server-side |
 | `createInstance()` inside `page.tsx` | Re-fetches config on every request; loses per-instance dedup | Create the client once in `lib/signakit.ts` |
 | `decide()` inside a `'use client'` component | Requires bundling the server SDK client-side | Evaluate in the server component, pass result as prop |
 | `decideAll()` in `proxy.ts` | Evaluates every flag on every request | Use `decide('specific-flag')` with a narrow `matcher` |
 | Not awaiting `signakitReady` | `decide()` returns `null` if config hasn't loaded yet | `await signakitReady` at the top of every evaluating server component |
+| Not using optional chaining on `createUserContext()` | Returns `null` if the client isn't ready — calling `.decide()` directly throws | Use `userCtx?.decide(...)` or check for null |
 
 ---
 
