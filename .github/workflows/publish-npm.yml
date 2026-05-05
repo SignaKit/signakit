@@ -3,6 +3,7 @@ name: Publish NPM
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: publish-npm
@@ -132,6 +133,9 @@ jobs:
           cache: npm
           cache-dependency-path: packages/flags-react/package-lock.json
       - run: npm install -g npm@latest
+      - name: Build flags-browser (local peer dep)
+        working-directory: packages/flags-browser
+        run: npm ci && npm run build
       - run: npm ci
       - name: Publish if version is new
         env:
