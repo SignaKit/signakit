@@ -31,7 +31,9 @@ final class SignaKitServiceProvider extends ServiceProvider
                 );
             }
 
-            $client = new SignaKitClient($sdkKey);
+            $refreshInterval = (int) config('signakit.refresh_interval', 30);
+
+            $client = new SignaKitClient($sdkKey, refreshInterval: $refreshInterval);
             $client->initialize();
 
             return $client;

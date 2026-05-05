@@ -28,6 +28,7 @@ export class ConfigManager {
   private projectId: string
   private environment: Environment
   private storage: AsyncStorageLike | null
+  private pollingTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: ConfigManagerOptions) {
     this.orgId = options.orgId
@@ -143,6 +144,35 @@ export class ConfigManager {
 
   getConfig(): ProjectConfig | null {
     return this.config
+  }
+
+  /**
+   * Start polling for config updates. Uses `_doFetch` directly — a failed
+   * background poll is silently skipped and retried on the next interval.
+   */
+  startPolling(intervalMs: number): void {
+    if (this.pollingTimer !== null) return
+    this.pollingTimer = setInterval(async () => {
+      try {
+        await this._doFetch()
+      } catch {
+        // Polling errors are silent — stale config is better than a crash
+      }
+    }, intervalMs)
+    // Don't prevent the JS runtime from exiting when the app is done
+    if (typeof this.pollingTimer === 'object' && 'unref' in this.pollingTimer) {
+      (this.pollingTimer as NodeJS.Timeout).unref()
+    }
+  }
+
+  /**
+   * Stop the polling loop.
+   */
+  stopPolling(): void {
+    if (this.pollingTimer !== null) {
+      clearInterval(this.pollingTimer)
+      this.pollingTimer = null
+    }
   }
 }
 

@@ -20,11 +20,28 @@ export class ConfigManager {
   private orgId: string
   private projectId: string
   private environment: Environment
+  private pollingTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: ConfigManagerOptions) {
     this.orgId = options.orgId
     this.projectId = options.projectId
     this.environment = options.environment
+  }
+
+  startPolling(intervalMs: number): void {
+    if (intervalMs <= 0 || this.pollingTimer !== null) return
+    this.pollingTimer = setInterval(() => {
+      this._doFetch().catch(() => {
+        // Polling errors are silent — stale config is better than noise
+      })
+    }, intervalMs)
+  }
+
+  stopPolling(): void {
+    if (this.pollingTimer !== null) {
+      clearInterval(this.pollingTimer)
+      this.pollingTimer = null
+    }
   }
 
   /**

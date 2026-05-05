@@ -10,6 +10,9 @@ public final class Constants {
     public static final String SIGNAKIT_EVENTS_URL =
             "https://60amq9ozsf.execute-api.us-east-2.amazonaws.com/v1/flag-events";
 
+    /** Default background poll interval in seconds. */
+    public static final long DEFAULT_POLLING_INTERVAL_SECONDS = 30L;
+
     /** 0-9999, gives 0.01% bucketing granularity. */
     public static final int BUCKET_SPACE = 10000;
 

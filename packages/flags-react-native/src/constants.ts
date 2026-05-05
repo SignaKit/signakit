@@ -1,5 +1,7 @@
 export const SIGNAKIT_CDN_URL = 'https://d30l2rkped5b4m.cloudfront.net'
 
+export const DEFAULT_POLLING_INTERVAL = 30_000 // 30 seconds
+
 export const SIGNAKIT_EVENTS_URL =
   'https://60amq9ozsf.execute-api.us-east-2.amazonaws.com/v1/flag-events'
 

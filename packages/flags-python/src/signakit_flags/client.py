@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from .config_manager import ConfigManager, parse_sdk_key
-from .constants import SIGNAKIT_EVENTS_URL
+from .constants import DEFAULT_POLLING_INTERVAL, SIGNAKIT_EVENTS_URL
 from .evaluator import evaluate_all_flags, evaluate_flag
 from .types import (
     Decision,
@@ -42,7 +42,19 @@ class SignaKitClient:
         events_url: str = SIGNAKIT_EVENTS_URL,
         async_client: httpx.AsyncClient | None = None,
         sync_client: httpx.Client | None = None,
+        polling_interval: float = DEFAULT_POLLING_INTERVAL,
     ) -> None:
+        """Initialise the client.
+
+        Args:
+            sdk_key: Your SignaKit SDK key.
+            config_manager: Optional injected config manager (used in tests).
+            events_url: Override the events endpoint (used in tests).
+            async_client: Injected async HTTP client (used in tests).
+            sync_client: Injected sync HTTP client (used in tests).
+            polling_interval: Seconds between config re-fetches. Set to ``0``
+                to disable background polling. Default: 30 seconds.
+        """
         if not sdk_key:
             raise ValueError("[SignaKit] sdk_key is required")
 
@@ -50,6 +62,7 @@ class SignaKitClient:
         self._events_url = events_url
         self._async_client = async_client
         self._sync_client = sync_client
+        self._polling_interval = polling_interval
         self._is_ready = False
 
         if config_manager is not None:
@@ -67,10 +80,12 @@ class SignaKitClient:
     # ---- lifecycle ---------------------------------------------------------
 
     async def on_ready(self) -> OnReadyResult:
-        """Fetch the config and mark the client ready."""
+        """Fetch the config, mark the client ready, and start background polling."""
         try:
             await self._config_manager.fetch_config()
             self._is_ready = True
+            if self._polling_interval > 0:
+                self._config_manager.start_polling(self._polling_interval)
             return OnReadyResult(success=True)
         except Exception as exc:  # noqa: BLE001 — surface as reason
             return OnReadyResult(success=False, reason=str(exc))
@@ -80,9 +95,19 @@ class SignaKitClient:
         try:
             self._config_manager.fetch_config_sync()
             self._is_ready = True
+            if self._polling_interval > 0:
+                self._config_manager.start_polling(self._polling_interval)
             return OnReadyResult(success=True)
         except Exception as exc:  # noqa: BLE001
             return OnReadyResult(success=False, reason=str(exc))
+
+    def close(self) -> None:
+        """Stop the background polling thread.
+
+        Call this when the client is no longer needed (e.g. in tests or
+        short-lived scripts) to allow the process to exit cleanly.
+        """
+        self._config_manager.stop_polling()
 
     @property
     def is_ready(self) -> bool:

@@ -8,7 +8,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'config_manager.dart';
-import 'constants.dart';
+import 'constants.dart' show kSignaKitEventsUrl, kDefaultPollingInterval;
 import 'decision.dart';
 import 'evaluator.dart';
 import 'types.dart';
@@ -19,6 +19,7 @@ class SignaKitClientConfig {
   const SignaKitClientConfig({
     required this.sdkKey,
     this.httpClient,
+    this.pollingInterval = kDefaultPollingInterval,
   });
 
   /// `sk_{env}_{orgId}_{projectId}_{random}`
@@ -26,12 +27,18 @@ class SignaKitClientConfig {
 
   /// Optional injected HTTP client (used in tests).
   final http.Client? httpClient;
+
+  /// How often to re-fetch the flag config from the CDN.
+  /// Uses ETags so a no-op poll is a lightweight conditional GET.
+  /// Set to [Duration.zero] to disable polling. Default: 30 seconds.
+  final Duration pollingInterval;
 }
 
 class SignaKitClient {
   SignaKitClient(SignaKitClientConfig config)
       : _sdkKey = config.sdkKey,
-        _httpClient = config.httpClient ?? http.Client() {
+        _httpClient = config.httpClient ?? http.Client(),
+        _pollingInterval = config.pollingInterval {
     if (config.sdkKey.isEmpty) {
       throw ArgumentError('[SignaKit] sdkKey is required');
     }
@@ -49,6 +56,7 @@ class SignaKitClient {
 
   final String _sdkKey;
   final http.Client _httpClient;
+  final Duration _pollingInterval;
   late final ConfigManager _configManager;
   late final Future<OnReadyResult> _readyFuture;
   bool _isReady = false;
@@ -57,9 +65,22 @@ class SignaKitClient {
     try {
       await _configManager.fetchConfig();
       _isReady = true;
+      if (_pollingInterval > Duration.zero) {
+        _configManager.startPolling(_pollingInterval);
+      }
       return const OnReadyResult(success: true);
     } catch (e) {
       return OnReadyResult(success: false, reason: e.toString());
+    }
+  }
+
+  /// Pause the background polling loop (e.g. when app is backgrounded).
+  void pausePolling() => _configManager.stopPolling();
+
+  /// Resume the background polling loop (e.g. when app returns to foreground).
+  void resumePolling() {
+    if (_pollingInterval > Duration.zero) {
+      _configManager.startPolling(_pollingInterval);
     }
   }
 
@@ -81,9 +102,10 @@ class SignaKitClient {
     );
   }
 
-  /// Closes the underlying HTTP client. Call when the client is no longer needed.
+  /// Stop polling and close the underlying HTTP client.
+  /// Call this when the client is no longer needed (e.g. in tests).
   void close() {
-    _configManager.close();
+    _configManager.close(); // also calls stopPolling()
   }
 
   // --- Internal API used by SignaKitUserContext ---
