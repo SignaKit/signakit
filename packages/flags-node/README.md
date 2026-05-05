@@ -1,6 +1,6 @@
 # @signakit/flags-node
 
-Official Node.js SDK for SignaKit Feature Flags. Fetches flag configurations from CloudFront/S3 and evaluates all flags locally for a user.
+Official Node.js SDK for SignaKit Feature Flags. Fetches flag configurations from CloudFront/S3 and evaluates all flags locally — no network call on the hot `decide()` path.
 
 ## Installation
 
@@ -8,148 +8,93 @@ Official Node.js SDK for SignaKit Feature Flags. Fetches flag configurations fro
 npm install @signakit/flags-node
 ```
 
-## Environment Variables
-
-Set SDK key in your environment:
-
-```bash
-SIGNAKIT_SDK_KEY=sk_dev_abc123xyz_1234_abcdef123456
-```
-
 ## Quick Start
 
-### Usage in Next.js (Server-Side)
+### 1. Create a module-level singleton
+
+Create the client **once** so it is shared across all requests in the same process. The config fetch kicks off immediately on module load.
 
 ```typescript
-// lib/signakit/getFlags.ts
-'use server'
+// lib/signakit.ts
+import { createInstance } from '@signakit/flags-node'
 
-import { cookies, headers } from 'next/headers'
-import { createInstance, type SignaKitDecisions, type SignaKitUserContext } from '@signakit/flags-node'
+const client = createInstance({
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+})
 
-interface Props {
-  slug: string
+export const signakit = client
+// Kick off the config fetch immediately — await this before evaluating flags
+export const signakitReady = client?.onReady()
+```
+
+> **Never call `createInstance` inside a request handler or route.** Every call creates a new instance that re-fetches config, bypasses deduplication, and adds latency. Create the singleton once at module level.
+
+### 2. Evaluate a flag
+
+```typescript
+import { signakit, signakitReady } from '@/lib/signakit'
+
+export async function getCheckoutVariant(visitorId: string) {
+  await signakitReady
+
+  const userCtx = signakit?.createUserContext(visitorId)
+  const decision = userCtx?.decide('checkout-redesign')
+
+  return decision?.variationKey === 'treatment' ? 'v2' : 'legacy'
 }
+```
 
-interface FlagsResult {
-  userContext: SignaKitUserContext
-  decisions: SignaKitDecisions
-}
+### 3. Track a conversion
 
-export async function getFlags({ slug }: Props): Promise<FlagsResult | null> {
+```typescript
+const userCtx = signakit?.createUserContext(visitorId)
+await userCtx?.trackEvent('purchase_completed', { value: 99.99 })
+```
+
+## Next.js App Router
+
+Evaluate flags in server components and pass results as props to client components.
+
+```typescript
+// lib/signakit.ts
+import { createInstance } from '@signakit/flags-node'
+
+const client = createInstance({ sdkKey: process.env.SIGNAKIT_SDK_KEY! })
+
+export const signakit = client
+export const signakitReady = client?.onReady()
+```
+
+```typescript
+// app/checkout/page.tsx
+import { signakit, signakitReady } from '@/lib/signakit'
+import { cookies } from 'next/headers'
+
+export default async function CheckoutPage() {
+  await signakitReady
+
   const cookieStore = await cookies()
-  const headerStore = await headers()
-  const visitorId = cookieStore.get('visitor_id')?.value
+  const visitorId = cookieStore.get('visitor_id')?.value ?? 'anonymous'
 
-  if (!visitorId) {
-    console.error('Missing visitor ID')
-    return null
-  }
+  const userCtx = signakit?.createUserContext(visitorId)
+  const checkout = userCtx?.decide('checkout-redesign')
 
-  const client = createInstance({
-    sdkKey: process.env.SIGNAKIT_SDK_KEY!,
-  })
-
-  if (!client) {
-    console.error('SignaKit client not created')
-    return null
-  }
-
-  const { success, reason } = await client.onReady()
-  if (!success) {
-    console.error('SignaKit client not ready:', reason)
-    return null
-  }
-
-  const userContext = client.createUserContext(visitorId, {
-    slug,
-    $userAgent: headerStore.get('user-agent') ?? undefined,
-  })
-
-  if (!userContext) {
-    console.error('User context could not be created')
-    return null
-  }
-
-  const decisions = userContext.decideAll()
-
-  return { userContext, decisions }
+  return checkout?.variationKey === 'treatment' ? <CheckoutV2 /> : <LegacyCheckout />
 }
 ```
 
-```typescript
-// app/page.tsx
-import { getFlags } from '@/lib/signakit/getFlags'
+See the full [Next.js App Router guide](https://docs.signakit.com/flags/guides/nextjs-app-router) for middleware, server actions, and conversion tracking patterns.
 
-export default async function Home() {
-  const flags = await getFlags({ slug: '/home/' })
+## Bot Detection
 
-  return (
-    <main>
-      {flags?.decisions['new-homepage']?.variationKey === 'treatment' ? (
-        <NewHomepage />
-      ) : (
-        <DefaultHomepage />
-      )}
-    </main>
-  )
-}
-```
-
-### Tracking Conversion Events
-
-To track events for experiment analysis, use `userContext.trackEvent()`. Events are sent immediately to the events API.
+Pass `$userAgent` as an attribute to enable automatic bot filtering. Detected bots receive `enabled: false` / `variationKey: 'off'` for every flag, and no exposure events are fired.
 
 ```typescript
-// app/page.tsx
-import { getFlags } from '@/lib/signakit/getFlags'
-
-export default async function Home() {
-  const flags = await getFlags({ slug: '/home/' })
-
-  // Track page view event
-  if (flags?.userContext) {
-    await flags.userContext.trackEvent('page_view')
-  }
-
-  return (
-    <main>
-      {flags?.decisions['new-homepage']?.variationKey === 'treatment' ? (
-        <NewHomepage />
-      ) : (
-        <DefaultHomepage />
-      )}
-    </main>
-  )
-}
-```
-
-```typescript
-// Track event with value (e.g., revenue)
-await userContext.trackEvent('purchase', { value: 99.99 })
-
-// Track event with metadata
-await userContext.trackEvent('form_submit', {
-  metadata: { formId: 'contact-form' }
+const userCtx = signakit?.createUserContext(visitorId, {
+  $userAgent: request.headers['user-agent'] ?? undefined,
+  plan: 'pro',
 })
 ```
-
-### Bot Detection
-
-The SDK can automatically detect bot traffic and exclude it from A/B tests. Pass the `$userAgent` attribute to enable bot detection:
-
-```typescript
-const userContext = client.createUserContext(visitorId, {
-  slug,
-  $userAgent: request.headers.get('user-agent') ?? undefined,
-})
-```
-
-When a bot is detected:
-- All flags return `{ variationKey: 'off', enabled: false }` (excluded from experiments)
-- Events are silently skipped (not sent to the API)
-
-This ensures bots don't skew your experiment results or inflate event counts.
 
 You can also use the `isBot` utility directly:
 
@@ -165,173 +110,158 @@ if (isBot(userAgent)) {
 
 ### `createInstance(config)`
 
-Creates a new SignaKit Feature Flags client instance.
+Creates a new SignaKit client. Starts fetching config immediately.
 
 ```typescript
 const client = createInstance({
-  sdkKey: 'sk_dev_abc123xyz_1234_abcdef123456',
+  sdkKey: process.env.SIGNAKIT_SDK_KEY!,
+  pollingInterval: 30_000, // optional, default 30 000 ms
 })
 ```
 
-**Parameters:**
-- `config.sdkKey` (required): Your SDK key from the SignaKit dashboard
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `sdkKey` | `string` | required | Your SignaKit SDK key (`sk_dev_…` or `sk_prod_…`) |
+| `pollingInterval` | `number` | `30000` | How often (ms) to re-fetch config. Uses ETags — a no-op poll is a lightweight conditional GET. Set to `0` to disable polling. |
 
-**Returns:** `SignaKitClient | null`
+**Returns:** `SignaKitClient | null` — `null` if the SDK key is missing or malformed.
+
+---
 
 ### `client.onReady()`
 
-Waits for the client to fetch the initial configuration.
+Resolves once the initial config fetch completes.
 
 ```typescript
 const { success, reason } = await client.onReady()
+
+if (!success) {
+  console.error('SignaKit failed to load config:', reason)
+  // Flags return null — treat as control/off state
+}
 ```
 
-**Returns:** `Promise<{ success: boolean, reason?: string }>`
+**Returns:** `Promise<{ success: boolean; reason?: string }>`
 
-### `client.createUserContext(userId, attributes)`
+Always await `onReady()` before calling `createUserContext()`. If you skip it, `createUserContext()` returns `null` and logs a warning.
 
-Creates a user context for evaluating flags.
+---
+
+### `client.createUserContext(userId, attributes?)`
+
+Creates a user context for flag evaluation. One context per request is the recommended pattern.
 
 ```typescript
-const userContext = client.createUserContext('user-123', {
+const userCtx = client.createUserContext('user-123', {
   plan: 'premium',
   country: 'US',
-  $userAgent: request.headers.get('user-agent') ?? undefined,
+  $userAgent: request.headers['user-agent'] ?? undefined,
 })
 ```
 
-**Parameters:**
-- `userId` (required): Unique identifier for the user (used for consistent bucketing)
-- `attributes` (optional): User attributes for audience targeting
-- `$userAgent` (optional): User-agent string for bot detection. If a bot is detected, flags return `off` and events are skipped.
+| Parameter | Type | Description |
+|---|---|---|
+| `userId` | `string` | Stable unique identifier. The same ID always produces the same variation for a given config. |
+| `attributes` | `UserAttributes` | Key-value pairs for audience targeting. Supported value types: `string`, `number`, `boolean`, `string[]`. Pass `$userAgent` to enable bot detection. |
 
-**Returns:** `SignaKitUserContext | null`
+**Returns:** `SignaKitUserContext | null` — `null` if the client is not yet ready.
+
+---
+
+### `client.destroy()`
+
+Stops the background polling loop and releases resources. Call this in tests or when the client is no longer needed.
+
+```typescript
+client.destroy()
+```
+
+---
 
 ### `userContext.decide(flagKey)`
 
-Evaluates a single flag for the user and returns the decision.
+Evaluates a single flag for this user. Fires an `$exposure` event automatically (fire-and-forget) for A/B test and multi-armed-bandit rules.
 
 ```typescript
-const decision = userContext.decide('new-checkout-flow')
+const decision = userCtx?.decide('new-checkout-flow')
 
+// Feature flag gate
 if (decision?.enabled) {
-  // Show new checkout flow
+  // Show new checkout
 }
 
-// Or check specific variation
+// A/B test variation branch
 if (decision?.variationKey === 'treatment') {
-  // Show treatment variation
+  // Show treatment
 }
 ```
 
-**Parameters:**
-- `flagKey` (required): The key of the flag to evaluate
+**Returns:** `SignaKitDecision | null` — `null` when the flag is not found, archived, or the user matches no rule.
 
-**Returns:** `SignaKitDecision | null` - The decision object, or `null` if flag not found/archived
-
-### `userContext.decideAll()`
-
-Evaluates all flags for the user and returns decisions.
-
-```typescript
-const decisions = userContext.decideAll()
-```
-
-**Returns:** `SignaKitDecisions` - Map of flag keys to decision objects
-
-### Decision Object
+#### `SignaKitDecision`
 
 ```typescript
 interface SignaKitDecision {
-  flagKey: string      // The flag key
-  variationKey: string // The variation key ('control', 'treatment', 'off', etc.)
-  enabled: boolean     // Whether the flag is enabled for this user
-  ruleKey: string | null // Which rule matched, if any
+  flagKey: string                                         // The flag key evaluated
+  variationKey: string                                    // Assigned variation: 'control', 'treatment', 'off', or a custom key
+  enabled: boolean                                        // true when the flag is on for this user
+  ruleKey: string | null                                  // The targeting rule that matched, or null for default allocation
+  ruleType: 'ab-test' | 'multi-armed-bandit' | 'targeted' | null  // Rule type, or null for default/disabled
+  variables: Record<string, string | number | boolean | Record<string, unknown>>  // Resolved variable values
 }
 ```
+
+Always null-check or use optional chaining — a `null` result means the flag is off/unrecognised and should be treated as the control state.
+
+---
+
+### `userContext.decideAll()`
+
+Evaluates all flags for this user. Fires an `$exposure` event for each flag (fire-and-forget).
+
+```typescript
+const decisions = userCtx?.decideAll()
+// decisions: Record<string, SignaKitDecision>
+
+const showNewNav = decisions?.['redesigned-nav']?.enabled ?? false
+```
+
+**Returns:** `SignaKitDecisions` (`Record<string, SignaKitDecision>`)
+
+Use `decide('specific-flag')` in preference to `decideAll()` when only one flag is needed — `decideAll()` fires an exposure event for every flag the user is bucketed into.
+
+---
 
 ### `userContext.trackEvent(eventKey, options?)`
 
-Tracks a conversion event for the user. Sends immediately to the events API.
+Tracks a conversion event. Events are sent immediately and include the user's current flag decisions for experiment attribution.
 
 ```typescript
 // Simple event
-await userContext.trackEvent('signup')
+await userCtx?.trackEvent('signup')
 
-// Event with value
-await userContext.trackEvent('purchase', { value: 99.99 })
+// Event with revenue value
+await userCtx?.trackEvent('purchase_completed', { value: 99.99 })
 
 // Event with metadata
-await userContext.trackEvent('form_submit', { metadata: { formId: 'contact' } })
+await userCtx?.trackEvent('form_submit', {
+  metadata: { formId: 'contact-form' },
+})
 ```
 
-**Parameters:**
-- `eventKey` (required): The event key (e.g., 'purchase', 'signup')
-- `options.value` (optional): Numeric value (e.g., revenue amount)
-- `options.metadata` (optional): Additional event metadata
+| Parameter | Type | Description |
+|---|---|---|
+| `eventKey` | `string` | The event key as defined in the SignaKit dashboard |
+| `options.value` | `number` | Optional numeric value (e.g. revenue amount) |
+| `options.metadata` | `Record<string, unknown>` | Optional metadata (max 4 KB serialised) |
 
-**Returns:** `Promise<void>`
+**Returns:** `Promise<void>` — never throws. Errors are logged internally and do not affect the response path. Events from detected bots are silently dropped.
 
-Events automatically include:
-- User ID and attributes
-- Timestamp
-- Active flag decisions (for experiment attribution)
+---
 
-## How It Works
+## TypeScript
 
-1. **Config Fetching**: The SDK fetches a JSON configuration from CloudFront/S3 containing all flag definitions, rules, and audience conditions.
-
-2. **Local Evaluation**: All flag evaluation happens locally. No network calls during `decide()` or `decideAll()`.
-
-3. **Consistent Bucketing**: Uses MurmurHash3 for deterministic bucketing. The same user ID always gets the same variation.
-
-4. **Rule Evaluation**: Rules are evaluated in priority order. First matching rule wins.
-
-5. **Automatic Exposure Tracking**: When `decide()` or `decideAll()` is called, the SDK automatically fires `$exposure` events (fire-and-forget). This enables experiment analysis without manual tracking.
-
-## Automatic Exposure Tracking
-
-The SDK automatically tracks exposure events when flags are evaluated. This happens transparently when you call `decide()` or `decideAll()`.
-
-### How It Works
-
-- Each call to `decide(flagKey)` sends an `$exposure` event for that flag
-- Each call to `decideAll()` sends an `$exposure` event for each flag
-- Events are fire-and-forget (non-blocking, errors are silently ignored)
-- Bots are excluded from exposure tracking (no events sent)
-
-### Exposure Event Structure
-
-```json
-{
-  "eventKey": "$exposure",
-  "userId": "user-123",
-  "timestamp": "2024-01-15T10:30:00.000Z",
-  "attributes": { "plan": "premium" },
-  "decisions": { "checkout-redesign": "treatment" },
-  "metadata": {
-    "flagKey": "checkout-redesign",
-    "variationKey": "treatment",
-    "ruleKey": "rule-0"
-  }
-}
-```
-
-### Deduplication
-
-The backend deduplicates exposure events within a 15-second window per user/flag/page combination. This means:
-- Multiple `decide()` calls on the same page won't create duplicate exposures
-- A user navigating to a new page will generate a new exposure event
-
-### Why Automatic Tracking?
-
-- **No manual instrumentation required**: Exposure data is captured automatically
-- **Accurate experiment analysis**: Every flag evaluation is tracked
-- **Non-blocking**: Fire-and-forget pattern ensures no impact on app performance
-
-## TypeScript Support
-
-The SDK is written in TypeScript and includes full type definitions.
+The SDK is written in TypeScript and ships full type definitions.
 
 ```typescript
 import {
@@ -344,8 +274,19 @@ import {
   type SignaKitDecisions,
   type SignaKitEvent,
   type TrackEventOptions,
+  type VariableValue,
+  type FlagVariable,
 } from '@signakit/flags-node'
 ```
+
+## How It Works
+
+1. **Config fetch** — On `createInstance()`, the SDK immediately fetches a JSON config (flag definitions, rules, audience conditions) from the SignaKit CDN via CloudFront/S3.
+2. **Local evaluation** — All `decide()` / `decideAll()` calls are pure in-memory operations. No network call per evaluation.
+3. **Background polling** — The config is re-fetched on the configured `pollingInterval` (default 30 s) using conditional GETs (`If-None-Match`). A 304 Not Modified response costs minimal bandwidth and CPU.
+4. **Consistent bucketing** — MurmurHash3 on `userId + flagSalt` deterministically assigns a variation. The same user ID always gets the same variation for the same config version.
+5. **Automatic exposure tracking** — `decide()` fires a fire-and-forget `$exposure` event for A/B test and multi-armed-bandit rules. `targeted` rollout rules are excluded — they have no experiment to attribute.
+6. **Event attribution** — `trackEvent()` automatically includes the user's current flag decisions so conversion events are correctly attributed to the active experiment arms.
 
 ## Contributing
 
