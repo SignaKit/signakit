@@ -60,7 +60,8 @@ This creates `config/signakit.php`:
 
 ```php title="config/signakit.php"
 return [
-    'sdk_key' => env('SIGNAKIT_SDK_KEY'),
+    'sdk_key'          => env('SIGNAKIT_SDK_KEY'),
+    'refresh_interval' => env('SIGNAKIT_REFRESH_INTERVAL', 30),
 ];
 ```
 

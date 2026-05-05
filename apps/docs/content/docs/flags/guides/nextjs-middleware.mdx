@@ -100,7 +100,7 @@ export async function proxy(request: NextRequest) {
 
   const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
   const userCtx = signakit.createUserContext(visitorId)
-  const decision = userCtx.decide('checkout-redesign')
+  const decision = userCtx?.decide('checkout-redesign')
 
   if (decision?.variationKey === 'treatment') {
     return NextResponse.rewrite(new URL('/checkout-v2', request.url))
@@ -136,7 +136,7 @@ export async function proxy(request: NextRequest) {
 
   const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
   const userCtx = signakit.createUserContext(visitorId)
-  const betaAccess = userCtx.decide('beta-dashboard')
+  const betaAccess = userCtx?.decide('beta-dashboard')
 
   if (!betaAccess?.enabled) {
     return NextResponse.redirect(new URL('/beta-waitlist', request.url))
@@ -177,7 +177,7 @@ export async function proxy(request: NextRequest) {
 
   // Use a fixed system key so every user gets the same result
   const userCtx = signakit.createUserContext('system')
-  const maintenance = userCtx.decide('maintenance-mode')
+  const maintenance = userCtx?.decide('maintenance-mode')
 
   if (maintenance?.enabled) {
     return NextResponse.redirect(new URL('/maintenance', request.url))
@@ -218,7 +218,7 @@ export async function proxy(request: NextRequest) {
   const visitorId = existingId ?? generateId()
 
   const userCtx = signakit.createUserContext(visitorId)
-  const decision = userCtx.decide('homepage-redesign')
+  const decision = userCtx?.decide('homepage-redesign')
 
   let response: NextResponse
 
@@ -264,7 +264,7 @@ export async function proxy(request: NextRequest) {
 
   const visitorId = request.cookies.get('visitor_id')?.value ?? 'anonymous'
   const userCtx = signakit.createUserContext(visitorId)
-  const decision = userCtx.decide('checkout-redesign')
+  const decision = userCtx?.decide('checkout-redesign')
 
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-signakit-checkout', decision?.variationKey ?? 'control')
