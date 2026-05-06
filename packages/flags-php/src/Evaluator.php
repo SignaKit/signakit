@@ -62,10 +62,11 @@ final class Evaluator
             $allowlist = (array) ($rule['allowlist'] ?? []);
             foreach ($allowlist as $entry) {
                 if ((string) ($entry['userId'] ?? '') === $userId) {
+                    $allowlistVariation = (string) ($entry['variation'] ?? '');
                     return new Decision(
                         flagKey:      $flagKey,
-                        variationKey: (string) ($entry['variation'] ?? ''),
-                        enabled:      true,
+                        variationKey: $allowlistVariation,
+                        enabled:      $allowlistVariation !== 'off',
                         ruleKey:      $ruleKey,
                         ruleType:     $ruleType,
                     );
@@ -99,7 +100,7 @@ final class Evaluator
             return new Decision(
                 flagKey:      $flagKey,
                 variationKey: $variationKey,
-                enabled:      true,
+                enabled:      $variationKey !== 'off',
                 ruleKey:      $ruleKey,
                 ruleType:     $ruleType,
             );
@@ -119,7 +120,7 @@ final class Evaluator
         return new Decision(
             flagKey:      $flagKey,
             variationKey: $variationKey,
-            enabled:      true,
+            enabled:      $variationKey !== 'off',
             ruleKey:      null,
             ruleType:     null,
         );
