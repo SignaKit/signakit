@@ -161,10 +161,62 @@ final class SignaKitUserContextTest extends TestCase
         $payload = json_decode($spy->lastPost['body'], associative: true);
         $event   = $payload['events'][0];
 
-        $this->assertSame('conversion', $event['type']);
+        $this->assertArrayNotHasKey('type', $event);
         $this->assertSame('checkout_complete', $event['eventKey']);
         $this->assertSame('user-42', $event['userId']);
         $this->assertArrayHasKey('timestamp', $event);
+    }
+
+    public function test_trackEvent_includes_cached_decisions_after_decide(): void
+    {
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(userId: 'user-1', flags: [$this->makeFlag('my-flag')], spy: $spy);
+        $ctx->decide('my-flag');
+        $ctx->trackEvent('purchase');
+
+        $payload = json_decode($spy->lastPost['body'], associative: true);
+        $event   = $payload['events'][0];
+
+        $this->assertArrayHasKey('decisions', $event);
+        $this->assertSame('on', $event['decisions']['my-flag']);
+    }
+
+    public function test_trackEvent_omits_decisions_when_decide_not_called(): void
+    {
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(spy: $spy);
+        $ctx->trackEvent('purchase');
+
+        $payload = json_decode($spy->lastPost['body'], associative: true);
+        $this->assertArrayNotHasKey('decisions', $payload['events'][0]);
+    }
+
+    public function test_trackEvent_includes_attributes_when_present(): void
+    {
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(attributes: ['plan' => 'premium'], spy: $spy);
+        $ctx->trackEvent('purchase');
+
+        $payload = json_decode($spy->lastPost['body'], associative: true);
+        $this->assertSame(['plan' => 'premium'], $payload['events'][0]['attributes']);
+    }
+
+    public function test_trackEvent_omits_attributes_when_empty(): void
+    {
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(attributes: [], spy: $spy);
+        $ctx->trackEvent('purchase');
+
+        $payload = json_decode($spy->lastPost['body'], associative: true);
+        $this->assertArrayNotHasKey('attributes', $payload['events'][0]);
     }
 
     public function test_trackEvent_includes_value_when_provided(): void
@@ -218,11 +270,38 @@ final class SignaKitUserContextTest extends TestCase
         $payload = json_decode($spy->lastPost['body'], associative: true);
         $event   = $payload['events'][0];
 
-        $this->assertSame('$exposure', $event['type']);
-        $this->assertSame('my-flag', $event['flagKey']);
-        $this->assertSame('on', $event['variationKey']);
-        $this->assertSame('rule-abc', $event['ruleKey']);
+        $this->assertArrayNotHasKey('type', $event);
+        $this->assertSame('$exposure', $event['eventKey']);
         $this->assertSame('user-99', $event['userId']);
+        $this->assertArrayHasKey('timestamp', $event);
+        $this->assertSame('on', $event['decisions']['my-flag']);
+        $this->assertSame('my-flag', $event['metadata']['flagKey']);
+        $this->assertSame('on', $event['metadata']['variationKey']);
+        $this->assertSame('rule-abc', $event['metadata']['ruleKey']);
+    }
+
+    public function test_sendExposure_includes_attributes_when_present(): void
+    {
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(attributes: ['plan' => 'premium'], spy: $spy);
+        $ctx->sendExposure('my-flag', 'on', 'rule-abc', 'ab-test');
+
+        $payload = json_decode($spy->lastPost['body'], associative: true);
+        $this->assertSame(['plan' => 'premium'], $payload['events'][0]['attributes']);
+    }
+
+    public function test_sendExposure_omits_attributes_when_empty(): void
+    {
+        $spy           = new \stdClass();
+        $spy->lastPost = null;
+
+        $ctx = $this->makeContext(attributes: [], spy: $spy);
+        $ctx->sendExposure('my-flag', 'on', 'rule-abc', 'ab-test');
+
+        $payload = json_decode($spy->lastPost['body'], associative: true);
+        $this->assertArrayNotHasKey('attributes', $payload['events'][0]);
     }
 
     public function test_sendExposure_skips_targeted_rule_type(): void
