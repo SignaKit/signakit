@@ -17,6 +17,9 @@ final class SignaKitUserContext
 {
     private const EVENTS_URL = 'https://60amq9ozsf.execute-api.us-east-2.amazonaws.com/v1/flag-events';
 
+    /** @var array<string, string> */
+    private array $cachedDecisions = [];
+
     public function __construct(
         private readonly string $userId,
         /** @var array<string, mixed> */
@@ -39,7 +42,13 @@ final class SignaKitUserContext
             return null;
         }
 
-        return Evaluator::evaluateFlag($flag, $this->userId, $this->attributes);
+        $decision = Evaluator::evaluateFlag($flag, $this->userId, $this->attributes);
+
+        if ($decision !== null) {
+            $this->cachedDecisions[$decision->flagKey] = $decision->variationKey;
+        }
+
+        return $decision;
     }
 
     /**
@@ -59,14 +68,21 @@ final class SignaKitUserContext
     public function trackEvent(string $eventKey, ?float $value = null): void
     {
         $event = [
-            'type'      => 'conversion',
             'eventKey'  => $eventKey,
             'userId'    => $this->userId,
-            'timestamp' => (int) (microtime(as_float: true) * 1000),
+            'timestamp' => self::nowIso(),
         ];
 
         if ($value !== null) {
             $event['value'] = $value;
+        }
+
+        if (!empty($this->cachedDecisions)) {
+            $event['decisions'] = $this->cachedDecisions;
+        }
+
+        if (!empty($this->attributes)) {
+            $event['attributes'] = $this->attributes;
         }
 
         $body    = json_encode(['events' => [$event]], JSON_THROW_ON_ERROR);
@@ -101,13 +117,20 @@ final class SignaKitUserContext
         }
 
         $event = [
-            'type'         => '$exposure',
-            'flagKey'      => $flagKey,
-            'variationKey' => $variationKey,
-            'ruleKey'      => $ruleKey,
-            'userId'       => $this->userId,
-            'timestamp'    => (int) (microtime(as_float: true) * 1000),
+            'eventKey'  => '$exposure',
+            'userId'    => $this->userId,
+            'timestamp' => self::nowIso(),
+            'decisions' => [$flagKey => $variationKey],
+            'metadata'  => [
+                'flagKey'      => $flagKey,
+                'variationKey' => $variationKey,
+                'ruleKey'      => $ruleKey,
+            ],
         ];
+
+        if (!empty($this->attributes)) {
+            $event['attributes'] = $this->attributes;
+        }
 
         $body    = json_encode(['events' => [$event]], JSON_THROW_ON_ERROR);
         $headers = [
@@ -125,6 +148,17 @@ final class SignaKitUserContext
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Current UTC time as an ISO 8601 string with millisecond precision.
+     * Matches the format used by all other SignaKit SDKs (e.g. "2025-05-05T12:00:00.123Z").
+     */
+    private static function nowIso(): string
+    {
+        $now = microtime(true);
+        $ms  = sprintf('%03d', (int) (($now - floor($now)) * 1000));
+        return gmdate('Y-m-d\TH:i:s', (int) $now) . '.' . $ms . 'Z';
+    }
 
     /**
      * @return array<string, mixed>|null
